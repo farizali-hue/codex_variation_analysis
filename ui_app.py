@@ -565,6 +565,15 @@ def _sync_active_run_snapshot() -> None:
         st.session_state["run_output_path"] = str(snapshot["output_path_text"])
         st.session_state["run_download_name"] = str(snapshot["download_name"])
         st.session_state["run_download_bytes"] = snapshot["download_bytes"]
+    else:
+        # A terminal run that produced no rows (e.g. a config error before
+        # scraping, or a stop/budget event before the first job finished) must
+        # not leave a previous run's results and download on screen as if they
+        # were the current result.
+        st.session_state["run_rows"] = []
+        st.session_state["run_output_path"] = ""
+        st.session_state["run_download_name"] = ""
+        st.session_state["run_download_bytes"] = b""
 
     st.session_state["active_run_id"] = ""
     remove_run_handle(active_run_id)

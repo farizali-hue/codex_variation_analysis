@@ -22,6 +22,28 @@ class ContractValueNormalizationTests(unittest.TestCase):
 
         self.assertEqual(result.value, "120")
 
+    def test_number_contract_preserves_thousands_separators(self) -> None:
+        contract = RunFieldContract(
+            requested_label="Capsule counts",
+            internal_key="capsule_counts",
+            output_type="number",
+        )
+        cases = {
+            "1,000 capsules": "1000",
+            "1,000 mg": "1000",
+            "1,234,567 units": "1234567",
+            "1,000.50 mg": "1000.5",
+            "500 mg": "500",
+            "2.50": "2.5",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                result = normalize_field_result_for_contract(
+                    FieldResult(value=raw, source="image", confidence=0.9, evidence=""),
+                    contract,
+                )
+                self.assertEqual(result.value, expected)
+
     def test_short_list_contract_normalizes_delimiters_and_deduplicates(self) -> None:
         result = normalize_field_result_for_contract(
             FieldResult(
