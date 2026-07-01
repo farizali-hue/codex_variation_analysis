@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import FieldResult
-from .value_parsers import normalize_whitespace
+from .value_parsers import normalize_numeric_string, normalize_whitespace
 
 _DEFAULT_PRESET_PATH = Path(__file__).resolve().parent.parent / "schemas" / "custom_field_presets.json"
 _ALLOWED_OUTPUT_TYPES = ("number", "short_list", "text")
-_NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 _LIST_SPLIT_PATTERN = re.compile("(?:\\r?\\n|[;,|\\u2022]+)")
 _AND_SPLIT_PATTERN = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
 
@@ -121,7 +120,7 @@ def normalize_custom_field_value(raw_value: str, preset: CustomFieldPreset) -> s
         return ""
 
     if preset.output_type == "number":
-        return _normalize_number_value(text)
+        return normalize_numeric_string(text)
     if preset.output_type == "short_list":
         return _normalize_short_list_value(text, merge_similar_values=preset.merge_similar_values)
     return _normalize_text_value(text, merge_similar_values=preset.merge_similar_values)
@@ -158,16 +157,6 @@ def deserialize_custom_field_presets(
 
 def _normalize_field_name(field_name: str) -> str:
     return normalize_whitespace(str(field_name or "").replace("-", "_").lower()).replace(" ", "_")
-
-
-def _normalize_number_value(text: str) -> str:
-    match = _NUMBER_PATTERN.search(text)
-    if not match:
-        return ""
-    number_text = match.group(0)
-    if "." in number_text:
-        number_text = number_text.rstrip("0").rstrip(".")
-    return number_text
 
 
 def _normalize_short_list_value(text: str, *, merge_similar_values: bool) -> str:

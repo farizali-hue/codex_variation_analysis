@@ -43,6 +43,25 @@ UNIT_NORMALIZATION = {
     "ounces": "oz",
 }
 
+_NUMERIC_VALUE_PATTERN = re.compile(AMOUNT_NUMBER_PATTERN)
+
+
+def normalize_numeric_string(text: str) -> str:
+    """Return the first numeric value in ``text`` as a bare number string.
+
+    Preserves grouped thousands ("1,000" -> "1000") and trims trailing decimal
+    zeros ("2.50" -> "2.5"); returns "" when no number is present. Shared by the
+    run-scoped contract and custom-preset number normalizers so thousands-separator
+    handling lives in exactly one place.
+    """
+    match = _NUMERIC_VALUE_PATTERN.search(text)
+    if not match:
+        return ""
+    number_text = match.group(0).replace(",", "")
+    if "." in number_text:
+        number_text = number_text.rstrip("0").rstrip(".")
+    return number_text
+
 
 def parse_value(parser_name: str, raw_value: str) -> str:
     """Parse a raw extracted value into normalized output based on parser name."""

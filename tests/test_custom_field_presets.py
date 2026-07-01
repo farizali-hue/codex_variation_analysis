@@ -43,6 +43,15 @@ class CustomFieldPresetTests(unittest.TestCase):
 
         self.assertEqual(result.value, "120")
 
+    def test_apply_number_preset_preserves_thousands_separators(self) -> None:
+        result = apply_custom_field_preset(
+            "capsule_count",
+            FieldResult(value="1,000 mg", source="image", confidence=0.9, evidence=""),
+            presets={"capsule_count": CustomFieldPreset(output_type="number")},
+        )
+
+        self.assertEqual(result.value, "1000")
+
     def test_apply_short_list_preset_normalizes_delimiters_and_deduplicates(self) -> None:
         result = apply_custom_field_preset(
             "free_from",

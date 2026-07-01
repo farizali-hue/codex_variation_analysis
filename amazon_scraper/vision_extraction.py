@@ -720,6 +720,17 @@ def _coerce_confidence(raw_value: object) -> float:
     return max(0.0, min(1.0, value))
 
 
+_FALSE_STRINGS = {"false", "no", "0", "none", "off", ""}
+
+
+def _coerce_bool(raw_value: object) -> bool:
+    # Model JSON may return a boolean flag as the string "false"; bool("false")
+    # is truthy in Python, so coerce false-like strings explicitly.
+    if isinstance(raw_value, str):
+        return raw_value.strip().lower() not in _FALSE_STRINGS
+    return bool(raw_value)
+
+
 def _coerce_int(raw_value: object, default: int = 0) -> int:
     try:
         return int(raw_value)
@@ -820,7 +831,7 @@ def _build_supplement_facts_detail(
     other_ingredients = _coerce_detail_text(payload.get("other_ingredients"))
     confidence = _coerce_confidence(payload.get("confidence"))
     evidence = _coerce_detail_text(payload.get("evidence"))
-    panel_detected = bool(payload.get("panel_detected", False))
+    panel_detected = _coerce_bool(payload.get("panel_detected", False))
     if not panel_detected:
         # The model reports panel_detected=false when the image is not a true
         # Supplement/Nutrition Facts panel; abstain rather than exporting rows

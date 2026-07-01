@@ -93,8 +93,9 @@ class _Consolidator:
 
     @staticmethod
     def _leading_int(value: str) -> str:
-        match = re.match(r"\s*(\d+)", value or "")
-        return match.group(1) if match else ""
+        # Accept grouped thousands so "1,000" -> "1000" instead of truncating to "1".
+        match = re.match(r"\s*(\d{1,3}(?:,\d{3})+|\d+)", value or "")
+        return match.group(1).replace(",", "") if match else ""
 
     @staticmethod
     def _item_form(serving_size_raw: str) -> str:

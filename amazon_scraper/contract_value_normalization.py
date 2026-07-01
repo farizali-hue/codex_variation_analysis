@@ -3,11 +3,8 @@ from __future__ import annotations
 import re
 
 from .models import FieldResult, RunFieldContract
-from .value_parsers import normalize_whitespace
+from .value_parsers import normalize_numeric_string, normalize_whitespace
 
-# Match grouped thousands (1,000 / 1,234,567 / 1,000.5) before plain numbers so a
-# comma-formatted quantity is not truncated to its leading group.
-_NUMBER_PATTERN = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
 _LIST_SPLIT_PATTERN = re.compile(r"(?:\r?\n|[;,|\u2022]+)")
 _AND_SPLIT_PATTERN = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
 
@@ -32,7 +29,7 @@ def normalize_value_for_contract(raw_value: str, field_contract: RunFieldContrac
         return ""
 
     if field_contract.output_type == "number":
-        return _normalize_number_value(text)
+        return normalize_numeric_string(text)
     if field_contract.output_type == "short_list":
         return _normalize_short_list_value(text)
     return normalize_whitespace(text)
@@ -53,16 +50,6 @@ def build_output_type_instruction(field_contract: RunFieldContract) -> str:
         "Output contract: return one cleaned text value only. "
         "Do not return explanations or multiple alternatives."
     )
-
-
-def _normalize_number_value(text: str) -> str:
-    match = _NUMBER_PATTERN.search(text)
-    if not match:
-        return ""
-    number_text = match.group(0).replace(",", "")
-    if "." in number_text:
-        number_text = number_text.rstrip("0").rstrip(".")
-    return number_text
 
 
 def _normalize_short_list_value(text: str) -> str:

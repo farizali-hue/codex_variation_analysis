@@ -519,6 +519,37 @@ class VisionFieldResolverTests(unittest.TestCase):
         # panel_detected=false must abstain even though rows parsed cleanly.
         self.assertIsNone(result.supplement_facts_detail)
 
+    def test_detail_mode_abstains_when_panel_detected_is_string_false(self) -> None:
+        client = _FakeVisionClient(
+            facts_detail_responses={
+                "facts": {
+                    "panel_detected": "false",
+                    "confidence": 0.95,
+                    "metadata": [{"label": "Serving Size", "raw_value_text": "2 Capsules"}],
+                    "ingredients": [
+                        {"name": "Vitamin C", "raw_amount_text": "500 mg", "category": "ingredient"}
+                    ],
+                    "other_ingredients": "",
+                    "unparsed_fragments": [],
+                }
+            }
+        )
+        resolver = VisionFieldResolver(
+            client=client,
+            model="gpt-5.4-mini",
+            cache_file=self.temp_dir / "vision_cache.json",
+        )
+
+        result = resolver.resolve_job(
+            asin="B0TEST",
+            requested_fields=["serving_size"],
+            images=[self._facts_image()],
+            extract_supplement_facts_details=True,
+        )
+
+        # A JSON string "false" must abstain too: bool("false") is truthy in Python.
+        self.assertIsNone(result.supplement_facts_detail)
+
     def test_detail_mode_abstains_on_low_confidence_payload(self) -> None:
         client = _FakeVisionClient(
             facts_detail_responses={

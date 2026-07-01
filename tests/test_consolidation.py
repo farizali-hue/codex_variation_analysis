@@ -89,6 +89,23 @@ def test_consolidation_collapses_and_cleans(tmp_path: Path) -> None:
     assert any("Ashwagandha" in r["canonical_column"] for r in unknowns)
 
 
+def test_leading_int_preserves_thousands_in_servings_per_container(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.csv"
+    _write_raw(raw, [
+        {
+            "asin": "A1", "product_type": "x", "status": "OK", "title": "t1",
+            "Serving Size": "3 Softgels", "Servings Per Container": "1,000",
+        },
+    ])
+
+    out = consolidate_csv(raw)
+    rows = {r["asin"]: r for r in _read(out)}
+
+    # 3 softgels x 1,000 servings = 3000 capsules; the comma must not truncate
+    # servings-per-container to 1 (which would yield "3").
+    assert rows["A1"]["number_of_capsules_per_container"] == "3000"
+
+
 def test_value_collision_is_flagged(tmp_path: Path) -> None:
     raw = tmp_path / "raw.csv"
     _write_raw(raw, [{
