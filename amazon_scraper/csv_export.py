@@ -12,6 +12,10 @@ from .value_parsers import normalize_whitespace
 LOGGER = logging.getLogger(__name__)
 
 _DETAIL_MODE_HANDLED_FIELD_KEYS = {"ingredients", "serving_size", "servings_per_container"}
+# Handled fields that map onto structured Supplement Facts metadata columns.
+_DETAIL_METADATA_FALLBACK_FIELD_KEYS = ("serving_size", "servings_per_container")
+# Flat handled field with no structured column representation; gets its own fallback column.
+_DETAIL_INGREDIENTS_FALLBACK_COLUMN = "ingredients"
 
 
 def write_results_csv(
@@ -162,8 +166,19 @@ def _build_detail_mode_export(
     export_columns: list[str] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     metadata_columns = _collect_detail_metadata_columns(results)
+    existing_metadata_keys = {
+        normalize_supplement_metadata_key(column) for column in metadata_columns
+    }
+    metadata_columns = metadata_columns + _collect_metadata_fallback_columns(
+        results, existing_keys=existing_metadata_keys
+    )
     ingredient_columns = _collect_detail_ingredient_columns(results)
     extra_columns = _collect_detail_extra_columns(results, export_columns=export_columns)
+    ingredient_keys = {_normalize_ingredient_key(column) for column in ingredient_columns}
+    include_ingredients_fallback = (
+        _needs_ingredients_fallback(results)
+        and _normalize_ingredient_key(_DETAIL_INGREDIENTS_FALLBACK_COLUMN) not in ingredient_keys
+    )
     fieldnames = [
         "asin",
         "product_type",
@@ -176,6 +191,7 @@ def _build_detail_mode_export(
         "unparsed_ingredients",
         *metadata_columns,
         *ingredient_columns,
+        *([_DETAIL_INGREDIENTS_FALLBACK_COLUMN] if include_ingredients_fallback else []),
         *extra_columns,
     ]
     metadata_column_by_key = {
@@ -214,6 +230,26 @@ def _build_detail_mode_export(
                 column_name = ingredient_column_by_key.get(_normalize_ingredient_key(ingredient.name))
                 if column_name and ingredient.csv_value and not row[column_name]:
                     row[column_name] = ingredient.csv_value
+        # Preserve requested-field fallbacks (HTML/image) for handled fields the
+        # structured panel did not populate, so detail mode never silently drops
+        # values when the panel is missing or only partially parsed.
+        for field_key in _DETAIL_METADATA_FALLBACK_FIELD_KEYS:
+            canonical_label = canonical_supplement_metadata_label(field_key)
+            column_name = (
+                metadata_column_by_key.get(normalize_supplement_metadata_key(canonical_label))
+                if canonical_label
+                else None
+            )
+            if not column_name or row[column_name]:
+                continue
+            field_result = result.fields.get(field_key)
+            if field_result and normalize_whitespace(field_result.value):
+                row[column_name] = field_result.value
+        if include_ingredients_fallback and not row[_DETAIL_INGREDIENTS_FALLBACK_COLUMN]:
+            if detail is None or not detail.ingredients:
+                field_result = result.fields.get(_DETAIL_INGREDIENTS_FALLBACK_COLUMN)
+                if field_result and normalize_whitespace(field_result.value):
+                    row[_DETAIL_INGREDIENTS_FALLBACK_COLUMN] = field_result.value
         for column in extra_columns:
             field_result = result.fields.get(column)
             row[column] = field_result.value if field_result else ""
@@ -277,6 +313,45 @@ def _collect_detail_extra_columns(
         if normalized not in columns:
             columns.append(normalized)
     return columns
+
+
+def _collect_metadata_fallback_columns(
+    results: list[ScrapeResult],
+    *,
+    existing_keys: set[str],
+) -> list[str]:
+    """Canonical metadata columns needed to carry ``result.fields`` fallbacks for
+    handled metadata fields (serving_size / servings_per_container) that the
+    structured panel did not already contribute for any result."""
+    columns: list[str] = []
+    seen: set[str] = set()
+    for field_key in _DETAIL_METADATA_FALLBACK_FIELD_KEYS:
+        label = canonical_supplement_metadata_label(field_key)
+        if not label:
+            continue
+        key = normalize_supplement_metadata_key(label)
+        if not key or key in existing_keys or key in seen:
+            continue
+        for result in results:
+            field_result = result.fields.get(field_key)
+            if field_result and normalize_whitespace(field_result.value):
+                seen.add(key)
+                columns.append(label)
+                break
+    return columns
+
+
+def _needs_ingredients_fallback(results: list[ScrapeResult]) -> bool:
+    """True when at least one result has an ``ingredients`` fallback value that
+    the structured detail panel does not represent (missing or empty panel)."""
+    for result in results:
+        field_result = result.fields.get(_DETAIL_INGREDIENTS_FALLBACK_COLUMN)
+        if not (field_result and normalize_whitespace(field_result.value)):
+            continue
+        detail = result.supplement_facts_detail
+        if detail is None or not detail.ingredients:
+            return True
+    return False
 
 
 def _normalize_ingredient_key(value: str) -> str:

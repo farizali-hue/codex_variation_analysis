@@ -454,6 +454,8 @@ class VisionFieldResolver:
             )
             if detail is None:
                 continue
+            if detail.confidence < self.classification_confidence_threshold:
+                continue
             coverage = len(detail.metadata) + len(detail.ingredients) + (1 if detail.other_ingredients else 0)
             score = (coverage, detail.confidence)
             if score > best_score:
@@ -819,7 +821,12 @@ def _build_supplement_facts_detail(
     confidence = _coerce_confidence(payload.get("confidence"))
     evidence = _coerce_detail_text(payload.get("evidence"))
     panel_detected = bool(payload.get("panel_detected", False))
-    if not panel_detected and not metadata_entries and not ingredient_entries and not other_ingredients and not unparsed_fragments:
+    if not panel_detected:
+        # The model reports panel_detected=false when the image is not a true
+        # Supplement/Nutrition Facts panel; abstain rather than exporting rows
+        # parsed from unsupported text (parity with the legacy facts path).
+        return None
+    if not metadata_entries and not ingredient_entries and not other_ingredients and not unparsed_fragments:
         return None
     return SupplementFactsDetail(
         metadata=metadata_entries,

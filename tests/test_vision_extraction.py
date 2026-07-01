@@ -478,6 +478,79 @@ class VisionFieldResolverTests(unittest.TestCase):
         legacy_calls = [call for call in client.calls if call["field"] == "__facts_panel__"]
         self.assertEqual(legacy_calls, [])
 
+    def _facts_image(self) -> GalleryImageRecord:
+        return GalleryImageRecord(
+            slot_index=0,
+            variant="PT01",
+            large_url="https://example.com/facts-large.jpg",
+            hi_res_url="https://example.com/facts-hires.jpg",
+            main_urls=["https://example.com/facts-main.jpg"],
+            physical_id="facts",
+        )
+
+    def test_detail_mode_abstains_when_panel_not_detected(self) -> None:
+        client = _FakeVisionClient(
+            facts_detail_responses={
+                "facts": {
+                    "panel_detected": False,
+                    "confidence": 0.95,
+                    "metadata": [{"label": "Serving Size", "raw_value_text": "2 Capsules"}],
+                    "ingredients": [
+                        {"name": "Vitamin C", "raw_amount_text": "500 mg", "category": "ingredient"}
+                    ],
+                    "other_ingredients": "",
+                    "unparsed_fragments": [],
+                }
+            }
+        )
+        resolver = VisionFieldResolver(
+            client=client,
+            model="gpt-5.4-mini",
+            cache_file=self.temp_dir / "vision_cache.json",
+        )
+
+        result = resolver.resolve_job(
+            asin="B0TEST",
+            requested_fields=["serving_size"],
+            images=[self._facts_image()],
+            extract_supplement_facts_details=True,
+        )
+
+        # panel_detected=false must abstain even though rows parsed cleanly.
+        self.assertIsNone(result.supplement_facts_detail)
+
+    def test_detail_mode_abstains_on_low_confidence_payload(self) -> None:
+        client = _FakeVisionClient(
+            facts_detail_responses={
+                "facts": {
+                    "panel_detected": True,
+                    "confidence": 0.30,
+                    "metadata": [{"label": "Serving Size", "raw_value_text": "2 Capsules"}],
+                    "ingredients": [
+                        {"name": "Vitamin C", "raw_amount_text": "500 mg", "category": "ingredient"}
+                    ],
+                    "other_ingredients": "",
+                    "unparsed_fragments": [],
+                }
+            }
+        )
+        resolver = VisionFieldResolver(
+            client=client,
+            model="gpt-5.4-mini",
+            cache_file=self.temp_dir / "vision_cache.json",
+        )
+
+        result = resolver.resolve_job(
+            asin="B0TEST",
+            requested_fields=["serving_size"],
+            images=[self._facts_image()],
+            extract_supplement_facts_details=True,
+        )
+
+        # Confidence below classification_confidence_threshold (0.55) must abstain,
+        # matching the legacy facts path rather than exporting weak panel data.
+        self.assertIsNone(result.supplement_facts_detail)
+
     def test_supplement_facts_detail_parser_enforces_contract_boundary(self) -> None:
         client = _FakeVisionClient(
             facts_detail_responses={
