@@ -1,0 +1,4 @@
+{"case_id":"flavor_equivalent_unflavored","field_internal_key":"flavor","requested_label":"Flavor","value_a":"No Flavour","value_b":"Unflavored","expected_decision":"equivalent","expected_canonical_value":"unflavored"}
+{"case_id":"packaging_equivalent_softgels","field_internal_key":"packaging_type","requested_label":"Packaging type","value_a":"Softgels","value_b":"Quick Release Softgels","expected_decision":"equivalent","expected_canonical_value":"softgels"}
+{"case_id":"flavor_distinct_vanilla","field_internal_key":"flavor","requested_label":"Flavor","value_a":"French Vanilla","value_b":"Vanilla","expected_decision":"distinct","expected_canonical_value":""}
+{"case_id":"flavor_uncertain_plain","field_internal_key":"flavor","requested_label":"Flavor","value_a":"Original","value_b":"Plain","expected_decision":"uncertain","expected_canonical_value":""}

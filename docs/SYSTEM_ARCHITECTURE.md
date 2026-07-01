@@ -1,22 +1,25 @@
-# System Architecture
+﻿# System Architecture
+
+Historical note: this file predates the current image-first, HTML-fallback implementation and is kept as legacy reference. Use [docs/ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) for the current architecture.
 
 ## Purpose
 
-This project scrapes Amazon product detail pages (PDPs) and extracts only the fields requested per ASIN. The architecture is retrieval-first:
+This project scrapes Amazon product detail pages (PDPs) and extracts only the fields requested or defaulted per ASIN. The architecture is retrieval-first:
 
 1. Load one PDP with Selenium.
-2. Normalize the visible product content into chunk records.
-3. Rank chunks against each requested field with embeddings.
-4. Ask the chat model to extract a structured value from the top-ranked evidence only.
-5. Export one CSV row per ASIN with value, source, confidence, and evidence.
+2. Extract visible product content as section-level plain text blocks.
+3. Normalize those blocks into chunk records.
+4. Rank chunks against each requested field with embeddings.
+5. Ask the chat model to extract a structured value from the top-ranked evidence only.
+6. Export one CSV row per ASIN with value, source, confidence, and evidence.
 
-The current implementation is optimized for batch extraction of a small set of product attributes such as `serving_size`, `caffeinated`, `caffeine_per_serving`, and `roast_level`.
+The current implementation is optimized for batch extraction of a small set of product attributes such as `serving_size`, `ingredients`, `packaging_type`, and `servings_per_container`.
 
 ## High-Level Flow
 
 ```mermaid
 flowchart TD
-    A[Input CSV\nasin + required_fields] --> B[run_mushroom_batch.py]
+    A[Input CSV\nasin + required_fields or product_type] --> B[run_product_batch.py]
     B --> C[read_jobs -> ScrapeJob]
     B --> D[OpenAIConfig.from_env]
     B --> E[AmazonScraper.run_batch]
@@ -24,7 +27,7 @@ flowchart TD
     F --> G[Prepare Amazon session\nlanguage + delivery ZIP]
     G --> H[Load PDP /dp/{asin}]
     H --> I[BeautifulSoup parse]
-    I --> J[HTML extractors\n title, facts, bullets,\n description, variations]
+    I --> J[HTML extractors\nsection-level plain text only\ntitle, facts block, bullets,\ndescription block, variation block]
     J --> K[build_chunk_records]
     K --> L[ChunkRecord[]]
     L --> M[DenseRetriever.rank_chunks\nper requested field]
@@ -39,11 +42,12 @@ flowchart TD
 
 ### 1. Batch entrypoint
 
-`run_mushroom_batch.py` owns CLI parsing, input loading, OpenAI configuration, scraper construction, and CSV export.
+`run_product_batch.py` owns CLI parsing, input loading, OpenAI configuration, scraper construction, and CSV export.
 
 Responsibilities:
 - Parse `--input-csv`, `--output-csv`, `--headless`, logging flags, and request pacing.
 - Read the input CSV into `ScrapeJob` records.
+- Load product-type field defaults from `schemas/product_type_fields.json` and use them when `required_fields` is omitted.
 - Fail fast if OpenAI configuration is missing.
 - Run a batch with one shared browser session.
 - Compute the union of requested fields to define CSV output columns.
@@ -68,21 +72,21 @@ Important implementation details:
 
 ### 3. HTML extraction layer
 
-`amazon_scraper.html_extractors` converts Amazon DOM structures into normalized Python data.
+`amazon_scraper.html_extractors` converts Amazon DOM sections into plain text blocks. This layer does not parse structure ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â no key/value row extraction, no dimension label normalization, no ARIA attribute walking. Its only job is to locate known page sections and return their visible text.
 
-Extractors:
-- `extract_title()`
-- `extract_facts_table()`
-- `extract_bullets()`
-- `extract_description_text()`
-- `extract_variations()`
-- `detect_page_state()`
+Public functions:
+- `detect_page_state()` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â classifies the rendered page into operational states
+- `extract_title()` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â returns the product title as a single string
+- `extract_bullets()` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â returns a list of plain text bullet strings
+- `extract_description_text()` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â returns merged plain text from description and A+ sections
+- `extract_facts_table()` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â returns plain text from the facts/details/overview containers as a single string
+- `extract_variations()` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â returns plain text of currently selected variation labels and values as a single string
 
-This layer is intentionally selector-heavy and isolated so DOM changes can be handled without touching retrieval or export logic.
+All semantic interpretation of what a label means, what dimension a variation belongs to, and how a field maps to page content is handled downstream by the retrieval and extraction layers. If Amazon changes a container's internal structure, only the selector in the relevant extractor function needs updating.
 
 ### 4. Chunking layer
 
-`amazon_scraper.chunking.build_chunk_records()` converts extracted HTML content into `ChunkRecord` instances.
+`amazon_scraper.chunking.build_chunk_records()` converts plain text sections into `ChunkRecord` instances.
 
 Each chunk includes:
 - `section`: logical origin such as `facts_table` or `bullets`
@@ -98,7 +102,7 @@ Section priority currently favors:
 4. `description`
 5. `title`
 
-Description text is split into sentence-like chunks up to about 500 characters to keep retrieval granular.
+Description text is split into sentence-like chunks up to about 500 characters to keep retrieval granular. Facts and variation text are passed as single blocks since their internal structure is preserved as plain text and the retrieval layer handles relevance.
 
 ### 5. Retrieval layer
 
@@ -130,7 +134,7 @@ Responsibilities:
 - Drop low-confidence or unsupported values.
 
 Important guardrails:
-- The system prompt explicitly says to use only supplied evidence.
+- The system prompt explicitly instructs the model to use only the supplied evidence chunks.
 - Empty values are returned when evidence is insufficient.
 - `confidence_threshold` defaults to `0.45`.
 - If the model omits source/evidence, the extractor falls back to the top-ranked chunk.
@@ -145,10 +149,10 @@ Two modules shape data quality:
   - Normalizes extracted values into stable output forms.
 
 Examples:
-- `yes_no_or_status` maps caffeine phrases to `Yes` / `No`
-- `amount_with_unit` pulls values like `50 mg`
-- `serving_size` extracts values like `30 servings`
-- `roast_level` normalizes phrases like `Medium Roast`
+- `serving_size` exports numeric values like `30`
+- `servings_per_container` exports numeric counts like `30`
+- `ingredients` exports short lists joined with ` | `
+- `packaging_type` exports cleaned text values such as `pouch`
 
 ### 8. Output layer
 
@@ -172,15 +176,31 @@ The fixed columns are:
 ### 9. Cross-cutting concerns
 
 Logging:
-- `amazon_scraper.logging_utils.configure_logging()` sets console and rotating-file logging.
+- `amazon_scraper.logging_utils.configure_logging()` sets live terminal logging and rotating-file logging.
+- Console logging is enabled by default and can be disabled with `--no-console-log`.
 - Selenium wire logs are reduced to keep logs readable.
-- uncaught exceptions and warnings are routed into logging.
+- Uncaught exceptions and warnings are routed into logging.
+
+OpenAI API usage logging:
+- Every embedding and chat/completions call emits a structured DEBUG-level log entry immediately after the response is received.
+- Embedding call entries include: `call_type`, `model`, `input_count`, `total_tokens`, `cache_hits`, `estimated_cost_usd`, `batch_estimated_cost_usd`, `max_cost_usd`.
+- Chat call entries include: `call_type`, `model`, `asin`, `field`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `retry_attempt`, `prompt_cost_usd`, `completion_cost_usd`, `estimated_cost_usd`, `batch_estimated_cost_usd`, `max_cost_usd`.
+- At the end of each ASIN job, one INFO-level summary is emitted with token totals, estimated cost for that job, cumulative batch estimated cost, and the configured max cost.
+- At the end of the full batch run, one INFO-level batch summary is emitted with total token usage, total estimated cost, job counts, and whether the batch stopped early.
+- All usage entries use the key prefix `api_usage` so they can be filtered from log files without parsing prose.
+- Cost estimation is optional and first tries a built-in price catalog for recognized OpenAI models, with manual overrides available when needed.
+- If `max_cost_usd` is configured, the run stops immediately after the API call that reaches or exceeds the limit.
 
 Configuration:
 - `amazon_scraper.openai_client.OpenAIConfig.from_env()` requires:
   - `OPENAI_API_KEY`
   - `OPENAI_EMBEDDING_MODEL`
   - `OPENAI_CHAT_MODEL`
+- Optional cost controls:
+  - `OPENAI_MAX_COST_USD`
+  - `OPENAI_EMBEDDING_COST_PER_1M_TOKENS`
+  - `OPENAI_CHAT_INPUT_COST_PER_1M_TOKENS`
+  - `OPENAI_CHAT_OUTPUT_COST_PER_1M_TOKENS`
 
 External dependencies:
 - Selenium + Chrome / ChromeDriver
@@ -193,18 +213,25 @@ External dependencies:
 
 Required columns:
 - `asin`
-- `required_fields` or `fields`
+- one of `required_fields` / `fields`, or `product_type` with a matching entry in `schemas/product_type_fields.json`
 
 Optional columns:
-- `product_type`
+- `product_type` when explicit fields are already supplied
 
 `required_fields` accepts comma, pipe, or semicolon separators.
+If both `product_type` and `required_fields` are present, `required_fields` wins for that row.
+`product_type` values are normalized, so spaces and hyphens resolve to the same key as underscores.
 
-Example:
+Examples:
 
 ```csv
 asin,product_type,required_fields
-B0B53Y7Z7D,mushroom_coffee,"serving_size,caffeinated,caffeine_per_serving,roast_level"
+B0FGX4T6D8,supplement,"serving_size,ingredients,packaging_type"
+```
+
+```csv
+asin,product_type
+B0FGX4T6D8,supplement
 ```
 
 ### Core runtime objects
@@ -213,7 +240,7 @@ B0B53Y7Z7D,mushroom_coffee,"serving_size,caffeinated,caffeine_per_serving,roast_
 - input contract for one ASIN request
 
 `ChunkRecord`
-- normalized retrieval unit derived from one PDP
+- normalized retrieval unit derived from one PDP section
 
 `FieldResult`
 - normalized field output with provenance and confidence
@@ -225,18 +252,26 @@ B0B53Y7Z7D,mushroom_coffee,"serving_size,caffeinated,caffeine_per_serving,roast_
 
 The scraper currently uses these page/result states:
 
-- `OK`
-  - title found and page looks healthy
-- `PARTIAL`
-  - page loaded but expected PDP signals are incomplete
-- `BLOCKED`
-  - Amazon CAPTCHA or anti-bot page detected
-- `NOT_FOUND`
-  - PDP does not exist or is unavailable
-- `NAVIGATION_ERROR`
-  - exception raised during scraping or extraction
+- `OK` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â title found and page looks healthy
+- `PARTIAL` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â page loaded but expected PDP signals are incomplete
+- `BLOCKED` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â Amazon CAPTCHA or anti-bot page detected
+- `NOT_FOUND` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â PDP does not exist or is unavailable
+- `NAVIGATION_ERROR` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â exception raised during scraping or extraction
 
 ## Design Decisions
+
+### Section-level plain text extraction instead of structured DOM parsing
+
+Why:
+- Amazon's DOM structure for facts tables and variation pickers changes frequently
+- Key/value row parsing and dimension label normalization are fragile and require ongoing maintenance
+- All semantic interpretation is handled more reliably by the retrieval and extraction layers
+- Reduces `html_extractors.py` to a thin, stable text-extraction layer that only needs selector updates when containers move
+
+Tradeoff:
+- Section-level text blocks are less granular than individual row chunks for facts/details
+- The extraction model must infer structure from plain text evidence rather than pre-parsed key/value pairs
+- Retrieval quality for tightly structured fields (e.g. a specific nutrition row) depends on embedding similarity being strong enough to surface the right block
 
 ### Retrieval-first extraction instead of whole-page prompting
 
@@ -275,14 +310,20 @@ Tradeoff:
 2. Add or extend a parser in `amazon_scraper/value_parsers.py` if needed.
 3. Include the new field in `required_fields` in the input CSV.
 
-No scraper orchestration changes are required if existing page content already contains the evidence.
+No scraper orchestration or HTML extractor changes are required if the evidence already appears in one of the extracted section text blocks.
+
+### Add or update a product type field set
+
+1. Edit `schemas/product_type_fields.json`.
+2. Add or update the category key, for example `mct_oil` or `liposomal_vitamin_c`.
+3. Add the default field list for that category.
+4. Only edit `amazon_scraper/product_type_schemas.py` if you want different normalization behavior.
 
 ### Improve robustness against Amazon DOM changes
 
-Edit only `amazon_scraper/html_extractors.py` first:
-- add selectors
-- update row parsing logic
-- add new variation detection rules
+Edit only `amazon_scraper/html_extractors.py`:
+- add or update CSS selectors for the affected section
+- no row parsing logic or label normalization to maintain
 
 ### Change retrieval behavior
 
@@ -301,13 +342,14 @@ Edit `amazon_scraper/csv_export.py`.
 - It assumes Chrome is installed or Selenium Manager can provision a compatible driver.
 - Amazon CAPTCHA can block fully automated execution.
 - The project currently runs jobs sequentially.
-- `schemas/` exists in the repo but is not used by the current code path.
+- Default field sets come from `schemas/product_type_fields.json`, so unknown product types without explicit `required_fields` are skipped.
+- Facts and variation text are passed as single plain text blocks; extraction quality for highly specific structured attributes depends on retrieval surfacing the right block.
 
 ## Recommended Reading Order
 
 For a new developer, read files in this order:
 
-1. `run_mushroom_batch.py`
+1. `run_product_batch.py`
 2. `amazon_scraper/scraper.py`
 3. `amazon_scraper/html_extractors.py`
 4. `amazon_scraper/chunking.py`
@@ -316,3 +358,5 @@ For a new developer, read files in this order:
 7. `amazon_scraper/field_hints.py`
 8. `amazon_scraper/value_parsers.py`
 9. `amazon_scraper/csv_export.py`
+
+

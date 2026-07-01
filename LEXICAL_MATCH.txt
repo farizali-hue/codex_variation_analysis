@@ -1,0 +1,154 @@
+**Root Problem**
+`Quick Release Softgels` is not joining the `softgels` cluster because the current canonicalizer in [run_scoped_canonicalization.py](/d:/codex_variation_analysis/amazon_scraper/run_scoped_canonicalization.py:108) does this:
+
+1. exact normalized match only
+2. otherwise embedding candidate search
+3. only if similarity clears the threshold does it ask the equivalence judge
+
+Right now `_orthographic_normalize()` in [run_scoped_canonicalization.py](/d:/codex_variation_analysis/amazon_scraper/run_scoped_canonicalization.py:419) does not remove modifiers like `quick release`, so `quick release softgels` and `softgels` are different strings. If they do not clear the embedding gate, the code drops straight into `new_cluster reason=no_match`, which is exactly what your [B0D1GQWYP9.json](/d:/codex_variation_analysis/logs/html_snapshots/B0D1GQWYP9.json:20) shows.
+
+**Options**
+1. Lower the global similarity threshold.
+This is simple, but it increases false merges across all text fields.
+
+2. Hardcode `quick release softgels -> softgels`.
+This is fast, but it is the kind of field-specific patch the repo explicitly warns against.
+
+3. Add a lexical candidate path before the embedding threshold.
+This is my recommended fix.
+
+**Recommended Fix**
+In [run_scoped_canonicalization.py](/d:/codex_variation_analysis/amazon_scraper/run_scoped_canonicalization.py), I would:
+
+1. Keep image-first unchanged.
+2. Keep exact-match clustering unchanged.
+3. Before the embedding threshold gate, add a cheap lexical candidate check for same-field text values.
+Examples:
+   `quick release softgels` vs `softgels`
+   `extra strength tablets` vs `tablets`
+4. If one value looks like the other plus modifiers, send that pair to the existing equivalence judge even if embedding similarity is below `0.88`.
+5. If the judge says they are equivalent, use the returned canonical value, which for this case should become `softgels`.
+6. Log this as a distinct merge path so it stays auditable.
+
+That keeps the fix:
+- image-first
+- cluster-layer only
+- generic
+- auditable
+- not dependent on HTML fallback
+
+**Tests I’d Add First**
+- `softgels` then `quick release softgels` should merge
+- `quick release softgels` then `softgels` should merge
+- `french vanilla` and `vanilla` should still stay separate
+
+If you approve this approach, I’ll implement option 3 with failing tests first.
+
+
+**Assumptions**
+- We keep image-first exactly as-is.
+- We do not add field-specific synonym tables.
+- Lexical matching is only a candidate generator, not an auto-merge rule.
+
+**Logic**
+I’d add the lexical candidate path inside [amazon_scraper/run_scoped_canonicalization.py](/d:/codex_variation_analysis/amazon_scraper/run_scoped_canonicalization.py), between exact-match lookup and the current embedding-threshold gate.
+
+Internally it would work like this:
+
+1. Normalize both values more aggressively than the current `_orthographic_normalize()`.
+2. Tokenize into words.
+3. Build a light lexical signature for each phrase.
+4. Compare the new value against existing cluster canonicals using conservative lexical relations.
+5. If a cluster is a strong lexical candidate, send that pair to the existing LLM equivalence judge even if embedding similarity is below `0.88`.
+6. Only merge if the judge still returns `equivalent` with enough confidence.
+
+So the lexical layer does not replace the judge. It only prevents obvious pairs from being filtered out too early.
+
+**Lexical Signature**
+For each value, I’d derive:
+
+- `normalized_text`
+- `tokens`
+- `singularized_tokens`
+- `joined_singular_text`
+
+Example:
+
+- `Quick Release Softgels`
+- normalized: `quick release softgels`
+- tokens: `["quick", "release", "softgels"]`
+- singularized: `["quick", "release", "softgel"]`
+
+- `Softgels`
+- normalized: `softgels`
+- tokens: `["softgels"]`
+- singularized: `["softgel"]`
+
+That gives us a common base without needing a hardcoded `softgels -> softgel` table beyond a very light plural-normalization heuristic.
+
+**Candidate Rules**
+I would only mark a pair as a lexical candidate if one of these is true:
+
+- Exact suffix containment after singularization.
+  Example: `quick release softgel` ends with `softgel`.
+- Exact prefix containment after singularization.
+  Useful for fields where the core term comes first.
+- Full token-set containment with a small token delta.
+  Example: all tokens in the shorter phrase appear in the longer phrase, and the longer phrase only adds 1-2 extra tokens.
+- Very high token overlap ratio.
+  Example: overlap on all shorter-phrase tokens.
+
+I would also cap it with guards like:
+
+- ignore empty or 1-character tokens
+- only compare phrases with a small token-count difference
+- only consider the top few lexical candidates
+
+**Why This Is Safe**
+The important part is: lexical match does **not** auto-merge.
+
+That avoids bad collapses like:
+
+- `french vanilla` vs `vanilla`
+- `dark chocolate` vs `chocolate`
+
+Those might still become lexical candidates, but the existing LLM judge in [run_scoped_canonicalization.py](/d:/codex_variation_analysis/amazon_scraper/run_scoped_canonicalization.py:173) would make the final call. So:
+
+- `quick release softgels` vs `softgels` should likely merge
+- `french vanilla` vs `vanilla` should likely stay distinct
+
+**Pseudocode**
+```python
+exact_cluster = find_exact_cluster(...)
+if exact_cluster:
+    return exact_merge
+
+lexical_candidates = rank_lexical_candidates(new_value, clusters)
+for cluster, relation in lexical_candidates:
+    judgment = judge_equivalence(new_value, cluster.canonical_value)
+    if judgment.equivalent and judgment.confidence >= threshold:
+        return semantic_merge
+
+embedding_candidates = rank_embedding_candidates(...)
+for cluster, similarity in embedding_candidates:
+    if similarity < semantic_threshold:
+        continue
+    judgment = judge_equivalence(new_value, cluster.canonical_value)
+    if judgment.equivalent and judgment.confidence >= threshold:
+        return semantic_merge
+
+return new_cluster
+```
+
+**Tradeoffs**
+- Pros: fixes obvious modifier-vs-base-form misses without changing image-first behavior.
+- Pros: stays generic and auditable.
+- Cons: slightly more LLM judgment calls.
+- Cons: lexical candidate generation will surface some non-equivalent pairs, but the judge should block bad merges.
+
+**Recommendation**
+This is the simplest generic fix I’m comfortable implementing under the repo guardrails: candidate generation becomes smarter, but final merge authority stays with the existing conservative judge.
+
+If you want, I can implement exactly this path next with regression tests for:
+- `softgels` + `quick release softgels` => same cluster
+- `vanilla` + `french vanilla` => different clusters

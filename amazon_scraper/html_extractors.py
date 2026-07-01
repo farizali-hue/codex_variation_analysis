@@ -1,23 +1,13 @@
 from __future__ import annotations
 
 import logging
-import re
-from dataclasses import dataclass
-from typing import Dict, List
+from typing import List
 
-from bs4 import BeautifulSoup
-from bs4.element import Tag
+from bs4 import BeautifulSoup, Tag
 
 from .value_parsers import normalize_whitespace
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class FactEntry:
-    label: str
-    value: str
-    normalized_label: str
 
 
 def detect_page_state(html: str, soup: BeautifulSoup) -> str:
@@ -46,7 +36,11 @@ def extract_bullets(soup: BeautifulSoup) -> List[str]:
     selectors = [
         "#feature-bullets li span.a-list-item",
         "#feature-bullets li",
+        "#productFacts_feature_div li",
         "#productFactsDesktop_feature_div li",
+        "#productFactsDesktopExpander_feature_div li",
+        "#productFactsMobile_feature_div li",
+        "#productFactsMobileExpander_feature_div li",
     ]
     for selector in selectors:
         for node in soup.select(selector):
@@ -63,123 +57,137 @@ def extract_description_text(soup: BeautifulSoup) -> str:
         "#aplus",
         "#bookDescription_feature_div",
         "#feature_div",
+        "#important-information",
+        "#pqv-important-information",
     ]
     chunks: List[str] = []
+    seen = set()
     for selector in selectors:
         node = soup.select_one(selector)
         if not node:
             continue
         text = normalize_whitespace(node.get_text(" ", strip=True))
-        if text:
+        if text and text not in seen:
+            seen.add(text)
             chunks.append(text)
     return " ".join(chunks).strip()
 
 
-def extract_facts_table(soup: BeautifulSoup) -> List[FactEntry]:
-    """Extract row-based key/value facts from product overview and detail sections."""
-    rows = soup.select(
-        "#productOverview_feature_div tr, "
-        "#prodDetails tr, "
-        "#detailBullets_feature_div li, "
-        "#technicalSpecifications_feature_div tr"
-    )
-    entries: List[FactEntry] = []
+def extract_facts_table(soup: BeautifulSoup) -> str:
+    """Extract merged plain text from product overview and detail sections."""
+    selectors = [
+        "#productOverview_feature_div",
+        "#prodDetails",
+        "#detailBullets_feature_div",
+        "#technicalSpecifications_feature_div",
+        "#productFacts_feature_div",
+        "#productFactsDesktop_feature_div",
+        "#productFactsDesktopExpander_feature_div",
+        "#productFactsMobile_feature_div",
+        "#productFactsMobileExpander_feature_div",
+        "#nic-po-expander-content",
+        "#item_details",
+    ]
+    chunks: List[str] = []
     seen = set()
-    for row in rows:
-        label, value = _extract_label_value_from_row(row)
-        if not label or not value:
+    for selector in selectors:
+        node = soup.select_one(selector)
+        if not node:
+            continue
+        rows = _extract_facts_rows(node)
+        if rows:
+            for row in rows:
+                if row not in seen:
+                    seen.add(row)
+                    chunks.append(row)
             continue
 
-        normalized_label = normalize_label(label)
-        key = (normalized_label, value.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        entries.append(FactEntry(label=label, value=value, normalized_label=normalized_label))
-    LOGGER.debug("Parsed facts table entries=%d", len(entries))
-    return entries
+        text = normalize_whitespace(node.get_text(" ", strip=True))
+        if text and text not in seen:
+            seen.add(text)
+            chunks.append(text)
+    facts_text = "\n".join(chunks).strip()
+    LOGGER.debug("Parsed facts table rows=%d chars=%d", len(chunks), len(facts_text))
+    return facts_text
 
 
-def extract_variations(soup: BeautifulSoup) -> Dict[str, str]:
-    """Extract currently selected variation values using ARIA selected-state markers."""
-    variations: Dict[str, str] = {}
-    selected_inputs = soup.select("input[aria-checked='true'][aria-labelledby]")
+def extract_variations(soup: BeautifulSoup) -> str:
+    """Extract plain text for currently selected variation labels/values."""
+    values: List[str] = []
+    seen = set()
+    selected_inputs = soup.select("input[aria-checked='true']")
     for selected_input in selected_inputs:
-        label_id = selected_input.get("aria-labelledby")
-        if not label_id:
-            continue
-        label_node = soup.select_one(f"#{label_id}")
-        if not label_node:
-            continue
-        value = normalize_whitespace(label_node.get_text(" ", strip=True))
-        if not value:
-            continue
+        label_ids = (selected_input.get("aria-labelledby") or "").split()
+        for label_id in label_ids:
+            label_node = soup.select_one(f"#{label_id}")
+            if not label_node:
+                continue
+            text = normalize_whitespace(label_node.get_text(" ", strip=True))
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
 
-        dimension = _extract_dimension_hint(label_id, selected_input)
-        variations[dimension] = value
-    LOGGER.debug("Parsed selected variations count=%d", len(variations))
-    return variations
+        input_id = selected_input.get("id")
+        if input_id:
+            for label_node in soup.select(f'label[for="{input_id}"]'):
+                text = normalize_whitespace(label_node.get_text(" ", strip=True))
+                if text and text not in seen:
+                    seen.add(text)
+                    values.append(text)
 
-
-def normalize_label(label: str) -> str:
-    normalized = normalize_whitespace(label).lower()
-    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
-    return " ".join(normalized.split())
-
-
-def _extract_label_value_from_row(row: Tag) -> tuple[str, str]:
-    if row.name == "li":
-        label_node = row.select_one(".a-text-bold")
-        if label_node:
-            label = normalize_whitespace(label_node.get_text(" ", strip=True)).rstrip(":")
-            text = normalize_whitespace(row.get_text(" ", strip=True))
-            value = normalize_whitespace(text.replace(label_node.get_text(" ", strip=True), "", 1)).strip(": ")
-            return label, value
-        return "", ""
-
-    cells = row.find_all(["th", "td"], recursive=False)
-    if len(cells) >= 2:
-        raw_label = normalize_whitespace(cells[0].get_text(" ", strip=True)).rstrip(":")
-        raw_value = normalize_whitespace(cells[1].get_text(" ", strip=True))
-        # Some rows keep semantic keys only in class names (e.g., po-caffeine_content_description).
-        if not raw_label:
-            raw_label = _label_from_row_classes(row)
-        if raw_label and raw_value:
-            return raw_label, raw_value
-
-    all_cells = row.find_all(["th", "td"])
-    if len(all_cells) >= 2:
-        raw_label = normalize_whitespace(all_cells[0].get_text(" ", strip=True)).rstrip(":")
-        raw_value = normalize_whitespace(all_cells[1].get_text(" ", strip=True))
-        if not raw_label:
-            raw_label = _label_from_row_classes(row)
-        if raw_label and raw_value:
-            return raw_label, raw_value
-
-    label = _label_from_row_classes(row)
-    value = normalize_whitespace(row.get_text(" ", strip=True))
-    if label and value and label.lower() != value.lower():
-        return label, value
-
-    return "", ""
+    variations_text = " ".join(values).strip()
+    LOGGER.debug("Parsed selected variations chars=%d", len(variations_text))
+    return variations_text
 
 
-def _label_from_row_classes(row: Tag) -> str:
-    for class_name in row.get("class", []):
-        if class_name.startswith("po-"):
-            token = class_name.replace("po-", "").replace("_", " ").replace("-", " ")
-            return normalize_whitespace(token)
-    return ""
+def _extract_facts_rows(node: Tag) -> List[str]:
+    rows: List[str] = []
+    seen = set()
+    candidate_groups = (
+        node.find_all("tr"),
+        node.find_all("li"),
+        node.find_all("dl"),
+        node.find_all(attrs={"role": "listitem"}),
+        node.select("div.a-fixed-left-grid"),
+        node.select("div.a-fixed-left-grid-inner"),
+    )
+
+    for candidates in candidate_groups:
+        local_rows = []
+        for candidate in candidates:
+            row = _normalize_fact_row(candidate)
+            if row and row not in seen:
+                seen.add(row)
+                local_rows.append(row)
+        if local_rows:
+            rows.extend(local_rows)
+            break
+
+    return rows
 
 
-def _extract_dimension_hint(label_id: str, selected_input: Tag) -> str:
-    lower_id = label_id.lower()
-    if "flavor" in lower_id or "flavour" in lower_id:
-        return "flavour"
-    if "roast" in lower_id:
-        return "roast_level"
+def _normalize_fact_row(node: Tag) -> str:
+    if node.name == "tr":
+        cells = [
+            normalize_whitespace(cell.get_text(" ", strip=True))
+            for cell in node.find_all(["th", "td"], recursive=False)
+        ]
+        cells = [cell for cell in cells if cell]
+        if len(cells) >= 2:
+            return f"{cells[0]}: {' '.join(cells[1:])}"
 
-    name_attr = (selected_input.get("name") or "").lower()
-    if "flavor" in name_attr or "flavour" in name_attr:
-        return "flavour"
-    return "variation"
+    if node.name == "dl":
+        label_parts = [
+            normalize_whitespace(cell.get_text(" ", strip=True))
+            for cell in node.find_all("dt", recursive=False)
+        ]
+        value_parts = [
+            normalize_whitespace(cell.get_text(" ", strip=True))
+            for cell in node.find_all("dd", recursive=False)
+        ]
+        label = " ".join(part for part in label_parts if part)
+        value = " ".join(part for part in value_parts if part)
+        if label and value:
+            return f"{label}: {value}"
+
+    return normalize_whitespace(node.get_text(" ", strip=True))

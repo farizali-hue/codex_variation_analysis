@@ -77,7 +77,8 @@ class DenseRetriever:
                 results[index] = cached
 
         if missing_texts:
-            for index, embedding in zip(missing_indices, self.client.create_embeddings(missing_texts)):
+            embeddings = self.client.create_embeddings(missing_texts, cache_hits=len(texts) - len(missing_texts))
+            for index, embedding in zip(missing_indices, embeddings):
                 results[index] = embedding
                 self.cache.set(self.embedding_model, texts[index], embedding)
             self.cache.save()
@@ -88,7 +89,7 @@ class DenseRetriever:
         cached = self.cache.get(self.embedding_model, text)
         if cached is not None:
             return cached
-        embedding = self.client.create_embeddings([text])[0]
+        embedding = self.client.create_embeddings([text], cache_hits=0)[0]
         self.cache.set(self.embedding_model, text, embedding)
         self.cache.save()
         return embedding

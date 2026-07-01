@@ -1,0 +1,7 @@
+{
+  "supplement": [
+    "serving_size",
+    "ingredients",
+    "packaging_type"
+  ]
+}
