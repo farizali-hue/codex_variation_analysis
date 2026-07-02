@@ -141,11 +141,6 @@ def remove_run_handle(run_id: str) -> None:
         _RUN_REGISTRY.pop(run_id, None)
 
 
-def serialize_results(results, export_columns: list[str]) -> list[dict[str, str]]:
-    _, rows = build_result_rows(results, export_columns=export_columns)
-    return rows
-
-
 def _run_batch_worker(
     *,
     handle: BatchRunHandle,

@@ -94,6 +94,29 @@ class SyncActiveRunSnapshotTests(unittest.TestCase):
         self.assertEqual(session["run_download_bytes"], b"new-bytes")
         self.assertEqual(session["active_run_id"], "")
 
+    def test_get_active_run_handle_exposes_terminal_handles_for_sync(self) -> None:
+        # The 2s run-controls fragment resolves the handle first; if terminal
+        # handles are hidden (None), its sync branch is unreachable and finished
+        # results stay off-screen until an unrelated full rerun.
+        session = self._session_with_prior_results("run-4")
+        snapshot = {
+            "state": "completed",
+            "message": "Done",
+            "error": "",
+            "started_at": "t0",
+            "finished_at": "t1",
+            "rows": [{"asin": "NEW"}],
+            "output_path_text": "outputs/new.csv",
+            "download_name": "new.csv",
+            "download_bytes": b"new-bytes",
+        }
+        self._install(session, snapshot)
+
+        handle = ui_app._get_active_run_handle()
+
+        self.assertIsNotNone(handle)
+        self.assertEqual(str(handle.snapshot()["state"]), "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

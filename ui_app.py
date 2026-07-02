@@ -587,8 +587,9 @@ def _get_active_run_handle():
     if handle is None:
         st.session_state["active_run_id"] = ""
         return None
-    if str(handle.snapshot()["state"]) in TERMINAL_RUN_STATES:
-        return None
+    # Terminal handles must stay visible: the run-controls fragment routes them
+    # to _sync_active_run_snapshot(). Hiding them here made that branch
+    # unreachable, leaving finished results off-screen until a full app rerun.
     return handle
 if __name__ == "__main__":
     main()

@@ -10,11 +10,15 @@ AMOUNT_UNIT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SERVING_SIZE_PATTERN = re.compile(
-    r"\b(\d+\s*(?:servings?|sticks?|packets?|pods?|capsules?|sachets?|count|ct))\b",
+    rf"\b({AMOUNT_NUMBER_PATTERN}\s*(?:servings?|sticks?|packets?|pods?|capsules?|sachets?|count|ct))\b",
     re.IGNORECASE,
 )
+# Require container context (label or servings/count suffix) before accepting a
+# number: a bare number in unrelated text must abstain, not become a canonical
+# count. Numbers accept grouped thousands ("1,000").
 SERVINGS_PER_CONTAINER_PATTERN = re.compile(
-    r"\b(?:servings?\s+per\s+(?:container|package)\s*:?\s*)?(\d+)\s*(?:servings?|count|ct)?\b",
+    rf"\bservings?\s+per\s+(?:container|package)\s*:?\s*({AMOUNT_NUMBER_PATTERN})\b"
+    rf"|\b({AMOUNT_NUMBER_PATTERN})\s*(?:servings?|count|ct)\b",
     re.IGNORECASE,
 )
 UNIT_NORMALIZATION = {
@@ -98,7 +102,8 @@ def parse_servings_per_container(text: str) -> str:
     match = SERVINGS_PER_CONTAINER_PATTERN.search(text)
     if not match:
         return ""
-    return normalize_whitespace(match.group(1))
+    number_text = match.group(1) or match.group(2) or ""
+    return normalize_whitespace(number_text).replace(",", "")
 
 
 def parse_packaging_type(text: str) -> str:

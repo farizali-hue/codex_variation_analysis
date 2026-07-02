@@ -109,7 +109,8 @@ _TRAILING_AMOUNT_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _UNITLESS_NUMERIC_AMOUNT_PATTERN = re.compile(rf"^{_AMOUNT_NUMBER_PATTERN}$")
-_DAILY_VALUE_PATTERN = re.compile(r"(?P<value><\s*1\s*%|\d+(?:\.\d+)?\s*%)")
+# Daily values can exceed 999% (e.g. B12 at 1,042%), so accept grouped thousands.
+_DAILY_VALUE_PATTERN = re.compile(rf"(?P<value><\s*1\s*%|{_AMOUNT_NUMBER_PATTERN}\s*%)")
 _FOOTNOTE_MARKER_PATTERN = re.compile(r"^[*+\u2020\u2021]+$")
 
 
@@ -975,7 +976,7 @@ def _normalize_daily_value_and_markers(value: str) -> tuple[str, list[str]]:
     markers: list[str] = []
     match = _DAILY_VALUE_PATTERN.search(text)
     if match:
-        daily_value = match.group("value").replace(" ", "")
+        daily_value = match.group("value").replace(" ", "").replace(",", "")
         before = text[: match.start()]
         after = text[match.end() :]
         markers.extend(_extract_marker_tokens(before))

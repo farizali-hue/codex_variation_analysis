@@ -550,6 +550,46 @@ class VisionFieldResolverTests(unittest.TestCase):
         # A JSON string "false" must abstain too: bool("false") is truthy in Python.
         self.assertIsNone(result.supplement_facts_detail)
 
+    def test_detail_mode_preserves_comma_formatted_daily_values(self) -> None:
+        client = _FakeVisionClient(
+            facts_detail_responses={
+                "facts": {
+                    "panel_detected": True,
+                    "confidence": 0.95,
+                    "metadata": [{"label": "Serving Size", "raw_value_text": "1 Tablet"}],
+                    "ingredients": [
+                        {
+                            "name": "Vitamin B12",
+                            "raw_amount_text": "500 mcg",
+                            "category": "ingredient",
+                            "daily_value_text": "1,042%",
+                        }
+                    ],
+                    "other_ingredients": "",
+                    "unparsed_fragments": [],
+                }
+            }
+        )
+        resolver = VisionFieldResolver(
+            client=client,
+            model="gpt-5.4-mini",
+            cache_file=self.temp_dir / "vision_cache.json",
+        )
+
+        result = resolver.resolve_job(
+            asin="B0TEST",
+            requested_fields=["serving_size"],
+            images=[self._facts_image()],
+            extract_supplement_facts_details=True,
+        )
+
+        detail = result.supplement_facts_detail
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        # High B-vitamin daily values print with thousands separators; the value
+        # must not truncate to the post-comma "042%".
+        self.assertEqual(detail.ingredients[0].daily_value_text, "1042%")
+
     def test_detail_mode_abstains_on_low_confidence_payload(self) -> None:
         client = _FakeVisionClient(
             facts_detail_responses={
