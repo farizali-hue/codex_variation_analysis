@@ -1,4 +1,4 @@
 beautifulsoup4==4.12.3
 selenium==4.28.1
 python-dotenv==1.2.2
-streamlit>=1.32,<2
+streamlit>=1.37,<2

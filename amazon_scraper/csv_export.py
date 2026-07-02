@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .models import ScrapeResult, SupplementFactsDetail
 from .supplement_facts_contract import canonical_supplement_metadata_label, normalize_supplement_metadata_key
@@ -16,6 +16,15 @@ _DETAIL_MODE_HANDLED_FIELD_KEYS = {"ingredients", "serving_size", "servings_per_
 _DETAIL_METADATA_FALLBACK_FIELD_KEYS = ("serving_size", "servings_per_container")
 # Flat handled field with no structured column representation; gets its own fallback column.
 _DETAIL_INGREDIENTS_FALLBACK_COLUMN = "ingredients"
+
+# Fixed identity/status columns owned by the export row contract in both export
+# modes. A requested field resolving onto one of these would duplicate the CSV
+# header and overwrite row metadata, so field intake rejects them
+# (input_normalization.resolve_field_name) and the exporters below remap any
+# collision that still arrives via programmatic export_columns/result keys.
+RESERVED_EXPORT_COLUMNS = frozenset(
+    {"asin", "product_type", "status", "url", "scraped_at", "title", "error"}
+)
 
 
 def write_results_csv(
@@ -132,11 +141,14 @@ def _build_legacy_export(
         "scraped_at",
         "title",
     ]
+    used_fieldnames = set(fieldnames) | {"error"}
+    header_by_column: dict[str, str] = {}
     for column in columns:
-        fieldnames.append(column)
-        fieldnames.append(f"{column}_source")
-        fieldnames.append(f"{column}_confidence")
-        fieldnames.append(f"{column}_evidence")
+        header = _dedupe_export_column(
+            column, used_fieldnames, header_group=_legacy_column_header_group
+        )
+        header_by_column[column] = header
+        fieldnames.extend(_legacy_column_header_group(header))
     fieldnames.append("error")
 
     rows: list[dict[str, str]] = []
@@ -151,11 +163,12 @@ def _build_legacy_export(
             "error": result.error or "",
         }
         for column in columns:
+            header = header_by_column[column]
             field_result = result.fields.get(column)
-            row[column] = field_result.value if field_result else ""
-            row[f"{column}_source"] = field_result.source if field_result else ""
-            row[f"{column}_confidence"] = f"{field_result.confidence:.2f}" if field_result else ""
-            row[f"{column}_evidence"] = field_result.evidence if field_result else ""
+            row[header] = field_result.value if field_result else ""
+            row[f"{header}_source"] = field_result.source if field_result else ""
+            row[f"{header}_confidence"] = f"{field_result.confidence:.2f}" if field_result else ""
+            row[f"{header}_evidence"] = field_result.evidence if field_result else ""
         rows.append(row)
     return fieldnames, rows
 
@@ -192,8 +205,13 @@ def _build_detail_mode_export(
         *metadata_columns,
         *ingredient_columns,
         *([_DETAIL_INGREDIENTS_FALLBACK_COLUMN] if include_ingredients_fallback else []),
-        *extra_columns,
     ]
+    used_fieldnames = set(fieldnames)
+    extra_header_by_column: dict[str, str] = {}
+    for column in extra_columns:
+        header = _dedupe_export_column(column, used_fieldnames)
+        extra_header_by_column[column] = header
+        fieldnames.append(header)
     metadata_column_by_key = {
         normalize_supplement_metadata_key(column): column
         for column in metadata_columns
@@ -252,9 +270,30 @@ def _build_detail_mode_export(
                     row[_DETAIL_INGREDIENTS_FALLBACK_COLUMN] = field_result.value
         for column in extra_columns:
             field_result = result.fields.get(column)
-            row[column] = field_result.value if field_result else ""
+            row[extra_header_by_column[column]] = field_result.value if field_result else ""
         rows.append(row)
     return fieldnames, rows
+
+
+def _legacy_column_header_group(column: str) -> tuple[str, str, str, str]:
+    return (column, f"{column}_source", f"{column}_confidence", f"{column}_evidence")
+
+
+def _dedupe_export_column(
+    column: str,
+    used_fieldnames: set[str],
+    *,
+    header_group: Callable[[str], tuple[str, ...]] = lambda name: (name,),
+) -> str:
+    """Remap a requested-field column that collides with an already-claimed
+    header, so a field value can never shadow metadata or structured columns.
+    ``header_group`` expands a candidate into every header it will claim (the
+    legacy schema claims value/source/confidence/evidence per column)."""
+    candidate = column
+    while any(name in used_fieldnames for name in header_group(candidate)):
+        candidate = f"custom_{candidate}"
+    used_fieldnames.update(header_group(candidate))
+    return candidate
 
 
 def _collect_export_columns(results: list[ScrapeResult]) -> list[str]:

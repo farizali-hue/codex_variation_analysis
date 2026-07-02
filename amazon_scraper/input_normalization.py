@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from difflib import get_close_matches
 from typing import Dict, Iterable, List, Sequence
 
+from .csv_export import RESERVED_EXPORT_COLUMNS
 from .field_hints import get_field_hint, get_supported_field_names
 from .models import ScrapeJob
 from .product_type_schemas import normalize_product_type
@@ -240,6 +241,12 @@ def resolve_field_name(raw_field: str) -> NormalizedFieldSelection:
         raise ValueError(f"Ambiguous field name {raw_input!r}. Did you mean one of: {choices}?")
 
     canonical_name = _generate_custom_field_name(raw_input)
+    if canonical_name in RESERVED_EXPORT_COLUMNS:
+        raise ValueError(
+            f"Field name {raw_input!r} is reserved: the CSV output always includes a "
+            f"{canonical_name!r} column, so a custom field cannot use it. "
+            "Choose a different field name."
+        )
     if not canonical_name:
         suggestions = ", ".join(_suggest_fields(normalized_input, alias_map))
         if suggestions:

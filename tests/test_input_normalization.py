@@ -62,6 +62,25 @@ class InputNormalizationTests(unittest.TestCase):
         self.assertEqual(selection.canonical_name, "total_servings")
         self.assertEqual(selection.matched_by, "generated")
 
+    def test_resolve_field_name_rejects_reserved_export_column_names(self) -> None:
+        for raw_input in ("ASIN", "Title", "URL", "Status", "Error", "Scraped At", "Product Type"):
+            with self.subTest(raw_input=raw_input):
+                with self.assertRaisesRegex(ValueError, "reserved"):
+                    resolve_field_name(raw_input)
+
+    def test_build_jobs_reports_reserved_field_and_keeps_remaining_fields(self) -> None:
+        result = build_jobs_from_user_input(
+            raw_asins="B0DJWV4BQ1",
+            raw_fields=["ASIN", "ingredients"],
+            product_type="",
+            product_type_defaults={},
+        )
+
+        self.assertEqual(len(result.jobs), 1)
+        self.assertEqual(result.jobs[0].requested_fields, ["ingredients"])
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("reserved", result.errors[0])
+
     def test_build_jobs_uses_product_type_defaults_when_fields_are_blank(self) -> None:
         result = build_jobs_from_user_input(
             raw_asins="B0DJWV4BQ1\nB0FSGHP1FC",
