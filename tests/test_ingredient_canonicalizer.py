@@ -17,6 +17,7 @@ from amazon_scraper.canonical_store import CanonicalStore
 from amazon_scraper.ingredient_canonicalizer import (
     IngredientCanonicalizer,
     LLMVerdict,
+    OpenAIIngredientLLM,
     default_normalize,
 )
 
@@ -124,3 +125,26 @@ def test_default_normalize_examples() -> None:
     assert default_normalize("Vitamin D3 (as cholecalciferol)") == "vitamin d3"
     assert default_normalize("Vitamin K2 (MK-7)") == "vitamin k2"
     assert default_normalize("Magnesium Glycinate") == "magnesium glycinate"
+
+
+class _MalformedResponseClient:
+    """OpenAI-client stand-in whose chat reply is not parseable JSON."""
+
+    def create_chat_completion(self, system_prompt, user_prompt, **kwargs) -> str:
+        return "Sorry, I cannot answer in JSON."
+
+
+def test_openai_llm_adapter_returns_uncertain_on_malformed_json() -> None:
+    # A garbage LLM reply must become an "uncertain" verdict (-> review queue),
+    # not an exception that aborts the whole consolidation run mid-ledger.
+    llm = OpenAIIngredientLLM(_MalformedResponseClient())
+
+    verdict = llm.decide(
+        raw_name="Vitamin D3",
+        normalized_name="vitamin d3",
+        candidates=[],
+        context="",
+    )
+
+    assert verdict.decision == "uncertain"
+    assert verdict.confidence == 0.0

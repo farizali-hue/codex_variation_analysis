@@ -139,7 +139,19 @@ class OpenAIFieldExtractor:
             cleaned = cleaned.strip("`")
             if cleaned.lower().startswith("json"):
                 cleaned = cleaned[4:].strip()
-        data = json.loads(cleaned)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):
+            # Raising here would bubble into run_job's catch-all and downgrade
+            # the WHOLE job to NAVIGATION_ERROR, dropping every already-resolved
+            # field. Abstain on this one field instead (vision-path parity).
+            LOGGER.warning(
+                "Discarding malformed extraction response as abstention response_chars=%d",
+                len(response_text),
+            )
+            return ExtractionResponse(value="", evidence="", source="", confidence=0.0)
         confidence = _coerce_confidence(data.get("confidence", 0))
         return ExtractionResponse(
             value=str(data.get("value", "") or ""),

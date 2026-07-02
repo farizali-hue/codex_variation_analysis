@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import re
-
 from .models import FieldResult, RunFieldContract
-from .value_parsers import normalize_numeric_string, normalize_whitespace
-
-_LIST_SPLIT_PATTERN = re.compile(r"(?:\r?\n|[;,|\u2022]+)")
-_AND_SPLIT_PATTERN = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
+from .value_parsers import (
+    normalize_numeric_string,
+    normalize_whitespace,
+    split_conjunction_items,
+    split_short_list_items,
+)
 
 
 def normalize_field_result_for_contract(
@@ -53,9 +53,11 @@ def build_output_type_instruction(field_contract: RunFieldContract) -> str:
 
 
 def _normalize_short_list_value(text: str) -> str:
-    parts = [normalize_whitespace(part) for part in _LIST_SPLIT_PATTERN.split(text) if normalize_whitespace(part)]
-    if len(parts) <= 1 and _AND_SPLIT_PATTERN.search(text):
-        parts = [normalize_whitespace(part) for part in _AND_SPLIT_PATTERN.split(text) if normalize_whitespace(part)]
+    parts = split_short_list_items(text)
+    if len(parts) <= 1:
+        conjunction_parts = split_conjunction_items(text)
+        if len(conjunction_parts) > 1:
+            parts = conjunction_parts
     if not parts:
         parts = [text]
 

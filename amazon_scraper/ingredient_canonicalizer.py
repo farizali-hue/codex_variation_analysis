@@ -19,6 +19,7 @@ goes to review instead of being merged.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -245,7 +246,16 @@ class OpenAIIngredientLLM:
             retry_attempt=0,
             model=self.model,
         )
-        payload = _parse_json_response(text)
+        try:
+            payload = _parse_json_response(text)
+        except json.JSONDecodeError:
+            # An unparseable verdict must become "uncertain" (-> review queue),
+            # not an exception that aborts the consolidation run mid-ledger.
+            LOGGER.warning(
+                "ingredient_canonicalization malformed LLM response; treating as uncertain raw=%s",
+                raw_name,
+            )
+            return LLMVerdict(decision="uncertain")
         return LLMVerdict(
             decision=str(payload.get("decision", "") or "").strip().lower(),
             canonical_name=str(payload.get("canonical_name", "") or "").strip(),

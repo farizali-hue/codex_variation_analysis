@@ -6,12 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import FieldResult
-from .value_parsers import normalize_numeric_string, normalize_whitespace
+from .value_parsers import (
+    normalize_numeric_string,
+    normalize_whitespace,
+    split_conjunction_items,
+    split_short_list_items,
+)
 
 _DEFAULT_PRESET_PATH = Path(__file__).resolve().parent.parent / "schemas" / "custom_field_presets.json"
 _ALLOWED_OUTPUT_TYPES = ("number", "short_list", "text")
-_LIST_SPLIT_PATTERN = re.compile("(?:\\r?\\n|[;,|\\u2022]+)")
-_AND_SPLIT_PATTERN = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
 
 OUTPUT_TYPE_LABELS = {
     "number": "Number",
@@ -160,9 +163,11 @@ def _normalize_field_name(field_name: str) -> str:
 
 
 def _normalize_short_list_value(text: str, *, merge_similar_values: bool) -> str:
-    parts = [normalize_whitespace(part) for part in _LIST_SPLIT_PATTERN.split(text) if normalize_whitespace(part)]
-    if len(parts) <= 1 and _AND_SPLIT_PATTERN.search(text):
-        parts = [normalize_whitespace(part) for part in _AND_SPLIT_PATTERN.split(text) if normalize_whitespace(part)]
+    parts = split_short_list_items(text)
+    if len(parts) <= 1:
+        conjunction_parts = split_conjunction_items(text)
+        if len(conjunction_parts) > 1:
+            parts = conjunction_parts
     if not parts:
         parts = [text]
 

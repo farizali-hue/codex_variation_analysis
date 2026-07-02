@@ -395,7 +395,16 @@ class RunScopedCanonicalizer:
             field="__run_scoped_canonicalization__",
             retry_attempt=0,
         )
-        payload = _parse_json_response(response_text)
+        try:
+            payload = _parse_json_response(response_text)
+        except json.JSONDecodeError:
+            # A garbage judge reply must abstain (uncertain), not raise out of
+            # register_field_result and take the whole scrape job down with it.
+            LOGGER.warning(
+                "field_merge_event internal_key=%s action=abstain reason=malformed_judge_response",
+                field_contract.internal_key,
+            )
+            payload = {"decision": "uncertain", "canonical_value": "", "confidence": 0.0}
         judgment = _CanonicalizationJudgment(
             decision=str(payload.get("decision", "") or "").strip().lower(),
             canonical_value=normalize_whitespace(str(payload.get("canonical_value", "") or "")),

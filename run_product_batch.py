@@ -148,6 +148,24 @@ def build_output_path_for_run(
     return resolved.with_name(f"{resolved.stem}_{suffix}{resolved.suffix}")
 
 
+def _export_partial_results(
+    partial_results: List,
+    *,
+    args: argparse.Namespace,
+    export_columns: List[str],
+) -> Path:
+    output_path = build_output_path_for_run(
+        args.output_csv,
+        extract_supplement_facts_details=args.extract_supplement_facts_details,
+    )
+    return write_results_csv(
+        results=partial_results,
+        output_file=output_path,
+        export_columns=export_columns,
+        extract_supplement_facts_details=args.extract_supplement_facts_details,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Amazon product scraper batch.")
     parser.add_argument("--input-csv", default="inputs/sample_product_asins.csv")
@@ -248,18 +266,9 @@ def main() -> int:
         )
         return 0
     except OpenAIBudgetExceededError as exc:
-        partial_results = getattr(exc, "partial_results", [])
+        partial_results = list(getattr(exc, "partial_results", []) or [])
         if partial_results:
-            output_path = build_output_path_for_run(
-                args.output_csv,
-                extract_supplement_facts_details=args.extract_supplement_facts_details,
-            )
-            output_path = write_results_csv(
-                results=partial_results,
-                output_file=output_path,
-                export_columns=export_columns,
-                extract_supplement_facts_details=args.extract_supplement_facts_details,
-            )
+            output_path = _export_partial_results(partial_results, args=args, export_columns=export_columns)
             LOGGER.error(
                 "Batch stopped at configured OpenAI spend limit estimated_cost_usd=%.6f max_cost_usd=%.6f partial_rows=%d output=%s",
                 exc.estimated_cost_usd,
@@ -277,7 +286,18 @@ def main() -> int:
     except OpenAIConfigError:
         LOGGER.exception("OpenAI configuration is invalid")
         return 2
-    except Exception:
+    except Exception as exc:
+        # DriverSessionLostError / ScrapeCancelledError carry the rows that
+        # finished before the abort; those already cost browser time and OpenAI
+        # spend, so persist them instead of discarding the whole batch.
+        partial_results = list(getattr(exc, "partial_results", []) or [])
+        if partial_results:
+            output_path = _export_partial_results(partial_results, args=args, export_columns=export_columns)
+            LOGGER.error(
+                "Batch aborted early; salvaged completed rows partial_rows=%d output=%s",
+                len(partial_results),
+                output_path,
+            )
         LOGGER.exception("Batch run failed")
         return 1
 

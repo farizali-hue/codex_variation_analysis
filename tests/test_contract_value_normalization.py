@@ -61,6 +61,40 @@ class ContractValueNormalizationTests(unittest.TestCase):
 
         self.assertEqual(result.value, "Gluten | Soy | Dairy")
 
+    def test_short_list_contract_keeps_commas_inside_parentheses(self) -> None:
+        # Botanical qualifiers like "(Curcuma longa, root)" are part of ONE item;
+        # splitting on the inner comma fabricates two broken list entries.
+        result = normalize_field_result_for_contract(
+            FieldResult(
+                value="Turmeric Root Extract (Curcuma longa, 95% curcuminoids), Black Pepper",
+                source="image",
+                confidence=0.9,
+                evidence="",
+            ),
+            RunFieldContract(
+                requested_label="Ingredients",
+                internal_key="ingredients",
+                output_type="short_list",
+            ),
+        )
+
+        self.assertEqual(
+            result.value,
+            "Turmeric Root Extract (Curcuma longa, 95% curcuminoids) | Black Pepper",
+        )
+
+    def test_short_list_contract_keeps_and_inside_parentheses_as_one_item(self) -> None:
+        result = normalize_field_result_for_contract(
+            FieldResult(value="Chocolate (rich and creamy)", source="image", confidence=0.9, evidence=""),
+            RunFieldContract(
+                requested_label="Flavor options",
+                internal_key="flavor_options",
+                output_type="short_list",
+            ),
+        )
+
+        self.assertEqual(result.value, "Chocolate (rich and creamy)")
+
     def test_text_contract_keeps_one_cleaned_text_value(self) -> None:
         result = normalize_field_result_for_contract(
             FieldResult(value="  French   Vanilla  ", source="image", confidence=0.9, evidence=""),

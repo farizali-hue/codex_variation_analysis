@@ -70,3 +70,22 @@ def test_repointing_a_variant_moves_it(tmp_path: Path) -> None:
     # the old entry no longer claims that alias
     k1 = next(e for e in store.entries() if e.canonical_name == "Vitamin K1")
     assert "vitamin k" not in k1.aliases
+
+
+def test_load_distrusts_unparseable_confidence(tmp_path: Path) -> None:
+    # Engine-written entries always carry a numeric confidence; a missing or
+    # garbage value means the file was hand-edited or corrupted. Distrust it
+    # (0.0) instead of granting full trust (1.0) — AGENTS.md rule 3.
+    path = tmp_path / "store.json"
+    path.write_text(
+        '{"version": 1, "canonicals": ['
+        '{"canonical_name": "Zinc", "aliases": ["zinc"], "confidence": "garbage"},'
+        '{"canonical_name": "Iron", "aliases": ["iron"]}'
+        "]}",
+        encoding="utf-8",
+    )
+
+    store = CanonicalStore.load(path)
+
+    confidences = {entry.canonical_name: entry.confidence for entry in store.entries()}
+    assert confidences == {"Zinc": 0.0, "Iron": 0.0}

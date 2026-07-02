@@ -166,5 +166,8 @@ def _coerce_confidence(raw_value: object) -> float:
     try:
         value = float(raw_value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return 1.0
+        # Engine-written entries always carry a numeric confidence; a missing or
+        # unparseable value means hand-edited/corrupt input — distrust it (0.0)
+        # rather than granting full trust, matching the other coercion helpers.
+        return 0.0
     return max(0.0, min(1.0, value))

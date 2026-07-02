@@ -159,3 +159,59 @@ def normalize_amount_to_mg(text: str) -> float | None:
 def normalize_whitespace(value: str) -> str:
     """Collapse repeated whitespace and trim edges for deterministic comparisons."""
     return " ".join(value.split()).strip()
+
+
+_LIST_HARD_DELIMITERS = {"\n", "|", "•"}
+_LIST_SOFT_DELIMITERS = {",", ";"}
+_OPENING_BRACKETS = {"(", "[", "{"}
+_CLOSING_BRACKETS = {")", "]", "}"}
+_CONJUNCTION_SPLIT_PATTERN = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
+
+
+def split_short_list_items(text: str) -> list[str]:
+    """Split a raw list string into items, keeping bracketed groups intact.
+
+    Newlines, pipes, and bullets always delimit; commas and semicolons delimit
+    only outside brackets, so qualifiers like "(Curcuma longa, root)" stay part
+    of one item instead of being split into broken fragments. Shared by the
+    run-scoped contract and custom-preset short_list normalizers.
+    """
+    items: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in text:
+        if char in _OPENING_BRACKETS:
+            depth += 1
+            current.append(char)
+        elif char in _CLOSING_BRACKETS:
+            depth = max(0, depth - 1)
+            current.append(char)
+        elif char in _LIST_HARD_DELIMITERS or (char in _LIST_SOFT_DELIMITERS and depth == 0):
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    items.append("".join(current))
+    return [item for item in (normalize_whitespace(part) for part in items) if item]
+
+
+def split_conjunction_items(text: str) -> list[str]:
+    """Split on standalone "and"/"&" joiners that sit outside brackets."""
+    depth_before: list[int] = []
+    depth = 0
+    for char in text:
+        depth_before.append(depth)
+        if char in _OPENING_BRACKETS:
+            depth += 1
+        elif char in _CLOSING_BRACKETS:
+            depth = max(0, depth - 1)
+
+    items: list[str] = []
+    last_index = 0
+    for match in _CONJUNCTION_SPLIT_PATTERN.finditer(text):
+        if depth_before[match.start()] != 0:
+            continue
+        items.append(text[last_index : match.start()])
+        last_index = match.end()
+    items.append(text[last_index:])
+    return [item for item in (normalize_whitespace(part) for part in items) if item]

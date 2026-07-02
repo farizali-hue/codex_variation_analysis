@@ -259,6 +259,69 @@ class RunScopedCanonicalizationTests(unittest.TestCase):
         self.assertEqual(self.canonicalizer.pop_merge_events(asin="ASIN1"), [])
 
 
+class _MalformedJudgmentClient(_FakeCanonicalizationClient):
+    """Embeddings behave normally, but every judge call returns non-JSON text."""
+
+    def create_chat_completion(self, system_prompt, user_prompt, **kwargs) -> str:  # type: ignore[override]
+        value_a = _extract_labeled_value(user_prompt, "Value A")
+        value_b = _extract_labeled_value(user_prompt, "Value B")
+        self.chat_calls.append((value_a, value_b))
+        return "I'm sorry, I can't produce JSON right now."
+
+
+class MalformedJudgmentResponseTests(unittest.TestCase):
+    """A malformed LLM judge response must abstain, not crash the whole job."""
+
+    def setUp(self) -> None:
+        self.cache_path = Path(".cache") / f"test-run-scoped-canonicalization-{uuid4().hex}.json"
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self._cleanup_cache_file)
+        self.client = _MalformedJudgmentClient()
+        self.canonicalizer = RunScopedCanonicalizer(
+            client=self.client,
+            embedding_model="text-embedding-3-small",
+            embedding_cache=EmbeddingCache(self.cache_path),
+            semantic_similarity_threshold=0.8,
+            judgment_confidence_threshold=0.75,
+        )
+        self.field_contract = RunFieldContract(
+            requested_label="Flavor",
+            internal_key="flavor",
+            output_type="text",
+            merge_similar_values=True,
+            matched_by="generated",
+        )
+
+    def _cleanup_cache_file(self) -> None:
+        try:
+            if self.cache_path.exists():
+                self.cache_path.unlink()
+        except PermissionError:
+            return
+
+    def test_malformed_judge_response_abstains_instead_of_raising(self) -> None:
+        self.canonicalizer.register_field_result(
+            asin="ASIN1",
+            field_contract=self.field_contract,
+            result=FieldResult(value="Vanilla", source="image", confidence=0.9, evidence="Vanilla"),
+        )
+        # "Vanilla Bean" is a lexical candidate against "Vanilla", so the judge
+        # is consulted; its garbage reply must abstain (uncertain), keep the
+        # value unmerged, and not raise out of register_field_result.
+        second = self.canonicalizer.register_field_result(
+            asin="ASIN2",
+            field_contract=self.field_contract,
+            result=FieldResult(value="Vanilla Bean", source="html", confidence=0.9, evidence="Vanilla Bean"),
+        )
+
+        self.assertEqual(second.value, "vanilla bean")
+        self.assertGreaterEqual(len(self.client.chat_calls), 1)
+        events = self.canonicalizer.pop_merge_events(asin="ASIN2")
+        actions = [event.action for event in events]
+        self.assertIn("abstain", actions)
+        self.assertEqual(actions[-1], "new_cluster")
+
+
 def _extract_labeled_value(prompt: str, label: str) -> str:
     prefix = f"{label}: "
     for line in prompt.splitlines():

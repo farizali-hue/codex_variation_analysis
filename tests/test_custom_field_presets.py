@@ -66,6 +66,20 @@ class CustomFieldPresetTests(unittest.TestCase):
 
         self.assertEqual(result.value, "Gluten | Soy | Dairy")
 
+    def test_apply_short_list_preset_keeps_commas_inside_parentheses(self) -> None:
+        result = apply_custom_field_preset(
+            "key_ingredients",
+            FieldResult(
+                value="Pumpkin Seed Oil (Cucurbita pepo, seed); Vitamin E",
+                source="image",
+                confidence=0.9,
+                evidence="",
+            ),
+            presets={"key_ingredients": CustomFieldPreset(output_type="short_list")},
+        )
+
+        self.assertEqual(result.value, "Pumpkin Seed Oil (Cucurbita pepo, seed) | Vitamin E")
+
     def test_apply_text_preset_can_merge_obvious_synonyms(self) -> None:
         result = apply_custom_field_preset(
             "flavor_note",
