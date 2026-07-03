@@ -19,11 +19,14 @@ The repo is deliberately documented for onboarding. Load in this order:
 
 1. @AGENTS.md — the always-on working contract for how to reason, explain,
    escalate, and implement here. **Follow it.**
-2. [docs/START_HERE.md](docs/START_HERE.md) — 5-minute mental model + "if you
+2. [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) — **current handoff
+   state**: what is done, what works today, and the agreed follow-up backlog.
+   Read this before proposing work; update it when you finish a phase.
+3. [docs/START_HERE.md](docs/START_HERE.md) — 5-minute mental model + "if you
    want to change X, go here" map.
-3. [docs/ARCHITECTURE_OVERVIEW.md](docs/ARCHITECTURE_OVERVIEW.md)
-4. [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md)
-5. ADRs — the accepted/proposed architecture:
+4. [docs/ARCHITECTURE_OVERVIEW.md](docs/ARCHITECTURE_OVERVIEW.md)
+5. [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md)
+6. ADRs — the accepted/proposed architecture:
    - [ADR-001 image-first / HTML-fallback](docs/decisions/ADR-001-image-first-html-fallback-extraction.md)
    - [ADR-002 engineering guardrails](docs/decisions/ADR-002-engineering-guardrails-for-agent-and-architecture-decisions.md)
    - [ADR-003 run-scoped typed field contracts + generic canonicalization](docs/decisions/ADR-003-run-scoped-typed-field-contracts-and-generic-canonicalization.md)
