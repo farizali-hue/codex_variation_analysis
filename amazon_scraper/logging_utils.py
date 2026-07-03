@@ -18,7 +18,7 @@ def configure_logging(
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     handlers: list[logging.Handler] = []
     if console:
-        handlers.append(logging.StreamHandler())
+        handlers.append(logging.StreamHandler(stream=sys.stdout))
     if log_file:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import List
 
-from .html_extractors import FactEntry
 from .models import ChunkRecord
 from .value_parsers import normalize_whitespace
 
@@ -19,10 +18,10 @@ _SECTION_PRIORITY = {
 def build_chunk_records(
     asin: str,
     title: str,
-    facts_table: List[FactEntry],
+    facts_table: str,
     bullets: List[str],
     description: str,
-    variations: Dict[str, str],
+    variations: str,
 ) -> List[ChunkRecord]:
     chunks: List[ChunkRecord] = []
     order = 0
@@ -46,19 +45,22 @@ def build_chunk_records(
 
     append_chunk("title", title, "#productTitle")
 
-    for entry in facts_table:
-        append_chunk("facts_table", f"{entry.label}: {entry.value}", entry.normalized_label)
+    for index, row in enumerate(_split_facts_table(facts_table), start=1):
+        append_chunk("facts_table", row, f"facts-table-{index}")
 
     for index, bullet in enumerate(bullets, start=1):
         append_chunk("bullets", bullet, f"feature-bullet-{index}")
 
-    for key, value in variations.items():
-        append_chunk("variations", f"{key}: {value}", f"variation-{key}")
+    append_chunk("variations", variations, "selected-variations")
 
     for index, sentence in enumerate(_split_description(description), start=1):
         append_chunk("description", sentence, f"description-{index}")
 
     return chunks
+
+
+def _split_facts_table(facts_table: str) -> List[str]:
+    return [line for line in (normalize_whitespace(part) for part in facts_table.splitlines()) if line]
 
 
 def _split_description(description: str, max_chars: int = 500) -> List[str]:

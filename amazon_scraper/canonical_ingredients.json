@@ -1,0 +1,138 @@
+{
+  "_comment": "Canonical ingredient/column dictionary for the Silver consolidation transform. Edit this file (no code change needed) to teach the consolidator new synonyms, drops, or renames. See consolidation.py.",
+
+  "identity_columns": ["asin", "url", "title", "packaging_type"],
+
+  "rename_columns": {
+    "Other ingredients": "Other Ingredients",
+    "Serving Size": "serving_size",
+    "Servings Per Container": "servings_per_container",
+    "Dietary fiber": "Dietary Fiber"
+  },
+
+  "nutrient_passthrough": [
+    "Calories", "Total Fat", "Saturated Fat", "Polyunsaturated Fat",
+    "Monounsaturated Fat", "Trans Fat", "Protein", "Total Carbohydrates",
+    "Sugars", "Sodium"
+  ],
+
+  "drop_columns": [
+    "product_type", "status", "scraped_at", "error", "unparsed_ingredients",
+    "Typical Fatty Acid Profile", "(4:1 extract)",
+    "Hydrolyzed Bovin Collagen", "Choline Bitartrate",
+    "Fo Ti (Polygonum multiflorum)(Root) Extract 4:1", "Hydrolyzed Keratin",
+    "Inositol", "L-Cysteine", "Methylsulfonylmethane (MSM)",
+    "Organic Ginseng (Panax ginseng)(Root) Extract (4:1)",
+    "Organic Horsetail (Equisetum arvense)(Aerial Parts)",
+    "Para-Amino Benzoic Acid", "Castor (Ricinus communis)(Seed) Oil",
+    "Beta-glucans", "Lycopene",
+    "Hydrolyzed Bovine Collagen, Choline Bitartrate, Fo Ti (Polygonum multiflorum)(Root) Extract (4:1), Hydrolyzed Keratin, Inositol, L-Cysteine, Methylsulfonylmethane (MSM), Organic Ginseng (Panax ginseng)(Root) Extract (4:1), Organic Horsetail (Equisetum arvense)(Aerial Parts), Para-Amino Benzoic Acid, Castor (Ricinus communis)(Seed) Oil.",
+    "Beta-glucans, Lycopene, Nettle (Urtica dioica L.)(Root) Extract (4:1), Organic Flaxseed (Linum usitatissimum)(Seed), Pygeum (Pygeum africanum)(Bark)"
+  ],
+
+  "sentinel_values": ["grammage not mentioned"],
+
+  "canonical_map": {
+    "Pumpkin Seed Oil (Cucurbita pepo)": "Pumpkin Seed Oil",
+    "Pumpkin Seed Oil": "Pumpkin Seed Oil",
+    "Pumpkin Seed Oil (cold-pressed)": "Pumpkin Seed Oil",
+    "Organic Pumpkin Seed Oil (Cucurbita pepo)": "Pumpkin Seed Oil",
+    "Cucurbita pepo": "Pumpkin Seed Oil",
+
+    "Saw Palmetto Extract (Serenoa repens)": "Saw Palmetto",
+    "Saw Palmetto Extract (Serenoa repens) (fruit)": "Saw Palmetto",
+    "Saw Palmetto Extract (Serenoa repens) (fruit) (a 4:1 extract, equivalent to 300mg of Saw Palmetto)": "Saw Palmetto",
+    "Saw Palmetto Extract": "Saw Palmetto",
+    "Saw Palmetto Berry Extract": "Saw Palmetto",
+    "Saw Palmetto Extract (Berry)": "Saw Palmetto",
+    "Saw Palmetto (Serenoa repens) (fruit)": "Saw Palmetto",
+    "Organic Saw Palmetto (Serenoa repens)(fruit) (4:1 Extract)": "Saw Palmetto",
+
+    "Omega-6 (Linoleic Acid)": "Omega-6 (Linoleic Acid)",
+    "Linoleic Acid (Omega-6)": "Omega-6 (Linoleic Acid)",
+    "Omega-9 (Oleic Acid)": "Omega-9 (Oleic Acid)",
+    "Oleic Acid (Omega-9)": "Omega-9 (Oleic Acid)",
+
+    "Pygeum Extract (Bark)": "Pygeum",
+    "Pygeum (Pygeum africanum)(Bark)": "Pygeum",
+
+    "Flax Seed Oil": "Flax Seed Oil",
+    "Flax Seed Oil (cold-pressed, organic)": "Flax Seed Oil",
+    "Organic Flaxseed (Linum usitatissimum)(Seed)": "Flax Seed Oil",
+    "Evening Primrose Oil": "Evening Primrose Oil",
+    "Evening Primrose Oil (cold-pressed) (seed)": "Evening Primrose Oil",
+    "Canola Oil": "Canola Oil",
+    "Canola Oil (cold-pressed, non-GMO) (seed)": "Canola Oil",
+    "Black Currant Oil": "Black Currant Oil",
+    "Black Currant Oil (cold-pressed) (seed)": "Black Currant Oil",
+
+    "Organic Rosemary (Rosmarinus officinalis)(Leaf) (30:1 Extract)": "Rosemary",
+    "Peppermint (Mentha haplocalyx) (Leaf) (4:1 Extract)": "Peppermint",
+    "Bamboo (Bambusa vulgaris)(Leaf) Silica (30:1 Extract)": "Bamboo Silica",
+
+    "Vitamin A (as retinyl palmitate)": "Vitamin A",
+    "Vitamin C (as ascorbic acid)": "Vitamin C",
+    "Vitamin D3 (as cholecalciferol)": "Vitamin D3",
+    "Vitamin E (as d-alpha tocopherol)": "Vitamin E",
+    "Vitamin B3 (as niacin)": "Vitamin B3",
+    "Vitamin B12 (as methylcobalamin)": "Vitamin B12",
+    "Biotin": "Biotin",
+    "Iron (as iron amino acid chelate)": "Iron",
+    "Iodine (as potassium iodide)": "Iodine",
+    "Zinc (as zinc gluconate)": "Zinc",
+    "Selenium (as selenium amino acid chelate)": "Selenium",
+
+    "Stinging Nettle (Urtica dioica) Leaf": "Stinging Nettle",
+    "Nettlr(Urtica dioica L.)(Root) Extract(4:1)": "Stinging Nettle",
+
+    "VivoNu Hair Growth Proprietary Blend": "VivoNu Hair Growth Proprietary Blend",
+    "VivoNu DHT Blocker Proprietary Blend": "VivoNu DHT Blocker Proprietary Blend",
+
+    "Vitamin D": "Vitamin D3",
+    "Vitamin D3": "Vitamin D3",
+    "Vitamin D3 Vegan": "Vitamin D3",
+    "Organic Vitamin D3": "Vitamin D3",
+    "Vitamin D (as cholecalciferol) (D3)": "Vitamin D3",
+
+    "Vitamin K2": "Vitamin K2",
+    "Vitamin K-2": "Vitamin K2",
+    "Vitamin K2 (MK-7)": "Vitamin K2",
+    "Vitamin K2 (MK-4)": "Vitamin K2",
+    "Vitamin K2 as MK7": "Vitamin K2",
+    "MK-7": "Vitamin K2",
+
+    "Magnesium": "Magnesium",
+    "Magnesium Glycinate": "Magnesium"
+  },
+
+  "normalization_rules": [
+    {"pattern": "[\\u2122\\u00ae\\u00a9]", "replace": ""},
+    {"pattern": "\\s*\\(as [^)]*\\)", "replace": ""},
+    {"pattern": "\\s*\\([^)]*\\d+:\\d+[^)]*\\)", "replace": ""},
+    {"pattern": "\\s*\\(cold[- ]pressed[^)]*\\)", "replace": ""},
+    {"pattern": "\\s*\\(mk-?\\d+\\)", "replace": ""},
+    {"pattern": "\\s*\\([^)]*menaquinone[^)]*\\)", "replace": ""},
+    {"pattern": "\\s*\\([^)]*vegadelight[^)]*\\)", "replace": ""},
+    {"pattern": "\\s*\\([^)]*lichen[^)]*\\)", "replace": ""},
+    {"pattern": "^Organic\\s+", "replace": ""},
+    {"pattern": "\\s+vegan\\b", "replace": ""},
+    {"pattern": "\\s+", "replace": " "}
+  ],
+
+  "external_columns": ["Brand", "Bought in Past Month", "Reviews", "Pack Size", "item_form"],
+
+  "output_order": [
+    "Brand", "asin", "url", "title", "Bought in Past Month", "Reviews",
+    "Pack Size", "serving_size", "servings_per_container",
+    "number_of_capsules_per_container", "packaging_type", "item_form",
+    "Pumpkin Seed Oil", "Other Ingredients", "Saw Palmetto", "Calories",
+    "Total Fat", "Saturated Fat", "Polyunsaturated Fat", "Monounsaturated Fat",
+    "Trans Fat", "Protein", "Total Carbohydrates", "Sugars", "Dietary Fiber",
+    "Sodium", "Omega-6 (Linoleic Acid)", "Omega-9 (Oleic Acid)", "Pygeum",
+    "Flax Seed Oil", "Evening Primrose Oil", "Canola Oil", "Black Currant Oil",
+    "Rosemary", "Peppermint", "Bamboo Silica", "Vitamin A", "Vitamin C",
+    "Vitamin D3", "Vitamin E", "Vitamin B3", "Vitamin B12", "Biotin", "Iron",
+    "Iodine", "Zinc", "Selenium", "Stinging Nettle",
+    "VivoNu Hair Growth Proprietary Blend", "VivoNu DHT Blocker Proprietary Blend"
+  ]
+}

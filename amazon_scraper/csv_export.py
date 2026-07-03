@@ -3,24 +3,136 @@ from __future__ import annotations
 import csv
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
-from .models import ScrapeResult
+from .models import ScrapeResult, SupplementFactsDetail
+from .supplement_facts_contract import canonical_supplement_metadata_label, normalize_supplement_metadata_key
+from .value_parsers import normalize_whitespace
 
 LOGGER = logging.getLogger(__name__)
+
+_DETAIL_MODE_HANDLED_FIELD_KEYS = {"ingredients", "serving_size", "servings_per_container"}
+# Handled fields that map onto structured Supplement Facts metadata columns.
+_DETAIL_METADATA_FALLBACK_FIELD_KEYS = ("serving_size", "servings_per_container")
+# Flat handled field with no structured column representation; gets its own fallback column.
+_DETAIL_INGREDIENTS_FALLBACK_COLUMN = "ingredients"
+
+# Fixed identity/status columns owned by the export row contract in both export
+# modes. A requested field resolving onto one of these would duplicate the CSV
+# header and overwrite row metadata, so field intake rejects them
+# (input_normalization.resolve_field_name) and the exporters below remap any
+# collision that still arrives via programmatic export_columns/result keys.
+RESERVED_EXPORT_COLUMNS = frozenset(
+    {"asin", "product_type", "status", "url", "scraped_at", "title", "error"}
+)
 
 
 def write_results_csv(
     results: Iterable[ScrapeResult],
     output_file: Path | str,
     export_columns: list[str] | None = None,
+    *,
+    extract_supplement_facts_details: bool = False,
 ) -> Path:
-    """Write normalized scrape output with value/source/confidence columns for all requested fields."""
+    """Write normalized scrape output using the legacy or supplement-facts-detail schema."""
     result_list = list(results)
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    columns = export_columns or _collect_export_columns(result_list)
 
+    if extract_supplement_facts_details:
+        fieldnames, rows = _build_detail_mode_export(result_list, export_columns=export_columns)
+    else:
+        fieldnames, rows = _build_legacy_export(result_list, export_columns=export_columns)
+
+    with output_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    if extract_supplement_facts_details:
+        _write_supplement_facts_rows_csv(result_list, _supplement_facts_rows_output_path(output_path))
+
+    LOGGER.info(
+        "CSV export complete rows=%d path=%s extract_supplement_facts_details=%s",
+        len(result_list),
+        output_path,
+        str(extract_supplement_facts_details).lower(),
+    )
+    return output_path
+
+
+def _supplement_facts_rows_output_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_supplement_facts_rows{output_path.suffix}")
+
+
+def _write_supplement_facts_rows_csv(results: list[ScrapeResult], output_path: Path) -> None:
+    fieldnames, rows = _build_supplement_facts_rows_export(results)
+    with output_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _build_supplement_facts_rows_export(results: list[ScrapeResult]) -> tuple[list[str], list[dict[str, str]]]:
+    fieldnames = [
+        "asin",
+        "row_order",
+        "name",
+        "amount_text",
+        "amount_mg",
+        "daily_value_text",
+        "footnote_markers",
+        "notes",
+        "category",
+        "parent_blend_name",
+        "source",
+        "confidence",
+        "evidence",
+    ]
+    rows: list[dict[str, str]] = []
+    for result in results:
+        detail = result.supplement_facts_detail
+        if detail is None:
+            continue
+        for row_order, ingredient in enumerate(detail.ingredients, start=1):
+            rows.append(
+                {
+                    "asin": result.asin,
+                    "row_order": str(row_order),
+                    "name": ingredient.name,
+                    "amount_text": ingredient.raw_amount_text,
+                    "amount_mg": _format_optional_number(ingredient.normalized_amount_mg),
+                    "daily_value_text": ingredient.daily_value_text,
+                    "footnote_markers": " | ".join(ingredient.footnote_markers),
+                    "notes": ingredient.notes,
+                    "category": ingredient.category,
+                    "parent_blend_name": ingredient.parent_blend_name,
+                    "source": detail.source,
+                    "confidence": f"{detail.confidence:.2f}" if detail.confidence else "",
+                    "evidence": detail.evidence,
+                }
+            )
+    return fieldnames, rows
+
+
+def build_result_rows(
+    results: Iterable[ScrapeResult],
+    *,
+    export_columns: list[str] | None = None,
+    extract_supplement_facts_details: bool = False,
+) -> tuple[list[str], list[dict[str, str]]]:
+    result_list = list(results)
+    if extract_supplement_facts_details:
+        return _build_detail_mode_export(result_list, export_columns=export_columns)
+    return _build_legacy_export(result_list, export_columns=export_columns)
+
+
+def _build_legacy_export(
+    results: list[ScrapeResult],
+    *,
+    export_columns: list[str] | None = None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    columns = export_columns or _collect_export_columns(results)
     fieldnames = [
         "asin",
         "product_type",
@@ -29,18 +141,91 @@ def write_results_csv(
         "scraped_at",
         "title",
     ]
+    used_fieldnames = set(fieldnames) | {"error"}
+    header_by_column: dict[str, str] = {}
     for column in columns:
-        fieldnames.append(column)
-        fieldnames.append(f"{column}_source")
-        fieldnames.append(f"{column}_confidence")
-        fieldnames.append(f"{column}_evidence")
+        header = _dedupe_export_column(
+            column, used_fieldnames, header_group=_legacy_column_header_group
+        )
+        header_by_column[column] = header
+        fieldnames.extend(_legacy_column_header_group(header))
     fieldnames.append("error")
 
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        for result in result_list:
-            row = {
+    rows: list[dict[str, str]] = []
+    for result in results:
+        row = {
+            "asin": result.asin,
+            "product_type": result.product_type,
+            "status": result.status,
+            "url": result.url,
+            "scraped_at": result.scraped_at.isoformat(),
+            "title": result.title,
+            "error": result.error or "",
+        }
+        for column in columns:
+            header = header_by_column[column]
+            field_result = result.fields.get(column)
+            row[header] = field_result.value if field_result else ""
+            row[f"{header}_source"] = field_result.source if field_result else ""
+            row[f"{header}_confidence"] = f"{field_result.confidence:.2f}" if field_result else ""
+            row[f"{header}_evidence"] = field_result.evidence if field_result else ""
+        rows.append(row)
+    return fieldnames, rows
+
+
+def _build_detail_mode_export(
+    results: list[ScrapeResult],
+    *,
+    export_columns: list[str] | None = None,
+) -> tuple[list[str], list[dict[str, str]]]:
+    metadata_columns = _collect_detail_metadata_columns(results)
+    existing_metadata_keys = {
+        normalize_supplement_metadata_key(column) for column in metadata_columns
+    }
+    metadata_columns = metadata_columns + _collect_metadata_fallback_columns(
+        results, existing_keys=existing_metadata_keys
+    )
+    ingredient_columns = _collect_detail_ingredient_columns(results)
+    extra_columns = _collect_detail_extra_columns(results, export_columns=export_columns)
+    ingredient_keys = {_normalize_ingredient_key(column) for column in ingredient_columns}
+    include_ingredients_fallback = (
+        _needs_ingredients_fallback(results)
+        and _normalize_ingredient_key(_DETAIL_INGREDIENTS_FALLBACK_COLUMN) not in ingredient_keys
+    )
+    fieldnames = [
+        "asin",
+        "product_type",
+        "status",
+        "url",
+        "scraped_at",
+        "title",
+        "error",
+        "Other ingredients",
+        "unparsed_ingredients",
+        *metadata_columns,
+        *ingredient_columns,
+        *([_DETAIL_INGREDIENTS_FALLBACK_COLUMN] if include_ingredients_fallback else []),
+    ]
+    used_fieldnames = set(fieldnames)
+    extra_header_by_column: dict[str, str] = {}
+    for column in extra_columns:
+        header = _dedupe_export_column(column, used_fieldnames)
+        extra_header_by_column[column] = header
+        fieldnames.append(header)
+    metadata_column_by_key = {
+        normalize_supplement_metadata_key(column): column
+        for column in metadata_columns
+    }
+    ingredient_column_by_key = {
+        _normalize_ingredient_key(column): column
+        for column in ingredient_columns
+    }
+
+    rows: list[dict[str, str]] = []
+    for result in results:
+        row = {field_name: "" for field_name in fieldnames}
+        row.update(
+            {
                 "asin": result.asin,
                 "product_type": result.product_type,
                 "status": result.status,
@@ -49,16 +234,66 @@ def write_results_csv(
                 "title": result.title,
                 "error": result.error or "",
             }
-            for column in columns:
-                field_result = result.fields.get(column)
-                row[column] = field_result.value if field_result else ""
-                row[f"{column}_source"] = field_result.source if field_result else ""
-                row[f"{column}_confidence"] = f"{field_result.confidence:.2f}" if field_result else ""
-                row[f"{column}_evidence"] = field_result.evidence if field_result else ""
-            writer.writerow(row)
+        )
+        detail = result.supplement_facts_detail
+        if detail is not None:
+            row["Other ingredients"] = detail.other_ingredients
+            row["unparsed_ingredients"] = " | ".join(detail.unparsed_fragments)
+            for metadata_entry in detail.metadata:
+                canonical_label = canonical_supplement_metadata_label(metadata_entry.label)
+                column_name = metadata_column_by_key.get(normalize_supplement_metadata_key(canonical_label))
+                if column_name and not row[column_name]:
+                    row[column_name] = metadata_entry.final_csv_value
+            for ingredient in detail.ingredients:
+                column_name = ingredient_column_by_key.get(_normalize_ingredient_key(ingredient.name))
+                if column_name and ingredient.csv_value and not row[column_name]:
+                    row[column_name] = ingredient.csv_value
+        # Preserve requested-field fallbacks (HTML/image) for handled fields the
+        # structured panel did not populate, so detail mode never silently drops
+        # values when the panel is missing or only partially parsed.
+        for field_key in _DETAIL_METADATA_FALLBACK_FIELD_KEYS:
+            canonical_label = canonical_supplement_metadata_label(field_key)
+            column_name = (
+                metadata_column_by_key.get(normalize_supplement_metadata_key(canonical_label))
+                if canonical_label
+                else None
+            )
+            if not column_name or row[column_name]:
+                continue
+            field_result = result.fields.get(field_key)
+            if field_result and normalize_whitespace(field_result.value):
+                row[column_name] = field_result.value
+        if include_ingredients_fallback and not row[_DETAIL_INGREDIENTS_FALLBACK_COLUMN]:
+            if detail is None or not detail.ingredients:
+                field_result = result.fields.get(_DETAIL_INGREDIENTS_FALLBACK_COLUMN)
+                if field_result and normalize_whitespace(field_result.value):
+                    row[_DETAIL_INGREDIENTS_FALLBACK_COLUMN] = field_result.value
+        for column in extra_columns:
+            field_result = result.fields.get(column)
+            row[extra_header_by_column[column]] = field_result.value if field_result else ""
+        rows.append(row)
+    return fieldnames, rows
 
-    LOGGER.info("CSV export complete rows=%d path=%s", len(result_list), output_path)
-    return output_path
+
+def _legacy_column_header_group(column: str) -> tuple[str, str, str, str]:
+    return (column, f"{column}_source", f"{column}_confidence", f"{column}_evidence")
+
+
+def _dedupe_export_column(
+    column: str,
+    used_fieldnames: set[str],
+    *,
+    header_group: Callable[[str], tuple[str, ...]] = lambda name: (name,),
+) -> str:
+    """Remap a requested-field column that collides with an already-claimed
+    header, so a field value can never shadow metadata or structured columns.
+    ``header_group`` expands a candidate into every header it will claim (the
+    legacy schema claims value/source/confidence/evidence per column)."""
+    candidate = column
+    while any(name in used_fieldnames for name in header_group(candidate)):
+        candidate = f"custom_{candidate}"
+    used_fieldnames.update(header_group(candidate))
+    return candidate
 
 
 def _collect_export_columns(results: list[ScrapeResult]) -> list[str]:
@@ -68,3 +303,103 @@ def _collect_export_columns(results: list[ScrapeResult]) -> list[str]:
             if field_name not in columns:
                 columns.append(field_name)
     return columns
+
+
+def _collect_detail_metadata_columns(results: list[ScrapeResult]) -> list[str]:
+    columns: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        detail = result.supplement_facts_detail
+        if detail is None:
+            continue
+        for entry in detail.metadata:
+            column = canonical_supplement_metadata_label(entry.label)
+            key = normalize_supplement_metadata_key(column)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            columns.append(column)
+    return columns
+
+
+def _collect_detail_ingredient_columns(results: list[ScrapeResult]) -> list[str]:
+    columns: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        detail = result.supplement_facts_detail
+        if detail is None:
+            continue
+        for ingredient in detail.ingredients:
+            key = _normalize_ingredient_key(ingredient.name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            columns.append(ingredient.name)
+    return columns
+
+
+def _collect_detail_extra_columns(
+    results: list[ScrapeResult],
+    *,
+    export_columns: list[str] | None = None,
+) -> list[str]:
+    requested_columns = export_columns or _collect_export_columns(results)
+    columns: list[str] = []
+    for column in requested_columns:
+        normalized = normalize_whitespace(column)
+        if not normalized or normalized in _DETAIL_MODE_HANDLED_FIELD_KEYS:
+            continue
+        if normalized not in columns:
+            columns.append(normalized)
+    return columns
+
+
+def _collect_metadata_fallback_columns(
+    results: list[ScrapeResult],
+    *,
+    existing_keys: set[str],
+) -> list[str]:
+    """Canonical metadata columns needed to carry ``result.fields`` fallbacks for
+    handled metadata fields (serving_size / servings_per_container) that the
+    structured panel did not already contribute for any result."""
+    columns: list[str] = []
+    seen: set[str] = set()
+    for field_key in _DETAIL_METADATA_FALLBACK_FIELD_KEYS:
+        label = canonical_supplement_metadata_label(field_key)
+        if not label:
+            continue
+        key = normalize_supplement_metadata_key(label)
+        if not key or key in existing_keys or key in seen:
+            continue
+        for result in results:
+            field_result = result.fields.get(field_key)
+            if field_result and normalize_whitespace(field_result.value):
+                seen.add(key)
+                columns.append(label)
+                break
+    return columns
+
+
+def _needs_ingredients_fallback(results: list[ScrapeResult]) -> bool:
+    """True when at least one result has an ``ingredients`` fallback value that
+    the structured detail panel does not represent (missing or empty panel)."""
+    for result in results:
+        field_result = result.fields.get(_DETAIL_INGREDIENTS_FALLBACK_COLUMN)
+        if not (field_result and normalize_whitespace(field_result.value)):
+            continue
+        detail = result.supplement_facts_detail
+        if detail is None or not detail.ingredients:
+            return True
+    return False
+
+
+def _normalize_ingredient_key(value: str) -> str:
+    return " ".join(normalize_whitespace(value).lower().split())
+
+
+def _format_optional_number(value: float | None) -> str:
+    if value is None:
+        return ""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.6f}".rstrip("0").rstrip(".")
