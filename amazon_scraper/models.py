@@ -82,3 +82,8 @@ class ScrapeResult:
     fields: Dict[str, FieldResult] = field(default_factory=dict)
     error: Optional[str] = None
     supplement_facts_detail: SupplementFactsDetail | None = None
+    # Panel extraction is tracked apart from the page fetch: a product must never read
+    # as fully successful while its Supplement Facts data is missing.
+    page_scrape_status: str = ""
+    facts_extraction_status: str = ""   # not_requested|image|html_fallback|no_panel_found|failed
+    facts_failure_reason: str = ""

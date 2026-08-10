@@ -157,7 +157,7 @@ class SupplementFactsExportTests(unittest.TestCase):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
         self.assertEqual(
-            fieldnames[:9],
+            fieldnames[:11],
             [
                 "asin",
                 "product_type",
@@ -166,16 +166,20 @@ class SupplementFactsExportTests(unittest.TestCase):
                 "scraped_at",
                 "title",
                 "error",
+                # Panel extraction is reported separately from the page fetch, so a
+                # product cannot read as OK while its Supplement Facts data is missing.
+                "facts_extraction_status",
+                "facts_failure_reason",
                 "Other ingredients",
                 "unparsed_ingredients",
             ],
         )
         self.assertEqual(
-            fieldnames[9:11],
+            fieldnames[11:13],
             ["Serving Size", "Servings Per Container"],
         )
         self.assertEqual(
-            fieldnames[11:17],
+            fieldnames[13:19],
             [
                 "Sodium",
                 "Vitamin C",

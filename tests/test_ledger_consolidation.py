@@ -101,3 +101,54 @@ def test_value_collision_is_flagged(tmp_path: Path) -> None:
     collisions = [r for r in _read(review) if r["type"] == "value_collision"]
     assert len(collisions) == 1
     assert collisions[0]["canonical_column"] == "Vitamin D3"
+
+
+def test_blend_members_show_presence_instead_of_a_blank_cell(tmp_path: Path) -> None:
+    """A blank cell cannot distinguish "no amount stated" from "not in this product"."""
+    ledger = tmp_path / "x_supplement_facts_rows.csv"
+    header = [*_LEDGER_HEADER, "parent_blend_name"]
+    with ledger.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=header)
+        writer.writeheader()
+        writer.writerows([
+            {"asin": "A1", "row_order": "1", "name": "Food Blend", "amount_text": "330 mg",
+             "amount_mg": "330", "category": "proprietary_blend", "evidence": "panel",
+             "parent_blend_name": ""},
+            {"asin": "A1", "row_order": "2", "name": "kale", "amount_text": "", "amount_mg": "",
+             "category": "blend_sub_ingredient", "evidence": "panel", "parent_blend_name": "Food Blend"},
+        ])
+    stub = StubCanonicalizer({
+        "Food Blend": _Decision(canonical="Food Blend"),
+        "kale": _Decision(canonical="Kale"),
+    })
+
+    out, review, _ = consolidate_from_ledger(ledger, canonicalizer=stub)
+    row = _read(out)[0]
+
+    assert row["Food Blend"] == "330"
+    assert row["Kale"] == "amount not mentioned (part of Food Blend)"
+    assert _read(review) == []
+
+
+def test_a_stated_amount_beats_a_blend_marker_without_colliding(tmp_path: Path) -> None:
+    ledger = tmp_path / "x_supplement_facts_rows.csv"
+    header = [*_LEDGER_HEADER, "parent_blend_name"]
+    with ledger.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=header)
+        writer.writeheader()
+        writer.writerows([
+            # blend member first, then the same nutrient on its own line with an amount
+            {"asin": "A1", "row_order": "1", "name": "zinc", "amount_text": "", "amount_mg": "",
+             "category": "blend_sub_ingredient", "evidence": "panel", "parent_blend_name": "Mineral Blend"},
+            {"asin": "A1", "row_order": "2", "name": "Zinc", "amount_text": "25 mg", "amount_mg": "25",
+             "category": "nutrient", "evidence": "panel", "parent_blend_name": ""},
+        ])
+    stub = StubCanonicalizer({
+        "zinc": _Decision(canonical="Zinc"),
+        "Zinc": _Decision(canonical="Zinc"),
+    })
+
+    out, review, _ = consolidate_from_ledger(ledger, canonicalizer=stub)
+
+    assert _read(out)[0]["Zinc"] == "25"        # the real number wins
+    assert _read(review) == []                  # and it is not a collision
