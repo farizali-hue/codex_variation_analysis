@@ -10,7 +10,12 @@ Decision flow for one ingredient string:
   2. store.lookup(key) hit -> done, no LLM ("cache")
   3. miss -> CandidateProvider gives the candidate canonicals -> LLM decides
   4. guardrails: disambiguation-class conflict OR confidence < threshold -> review queue
-  5. accepted match/new -> write back to the store (self-populating)
+  5. accepted match/new -> staged in the run's decision ledger (self-populating)
+
+Writes go through a `RunDecisionLedger` rather than straight to the store, so a decision
+consolidation later rejects never reaches the permanent vocabulary (ADR-004). Pass a
+deferred ledger as `store=` to get that gating; pass a plain `CanonicalStore` and the
+ledger runs in immediate mode, which is the historical write-through behavior.
 
 The engine never silently merges across disambiguation classes (e.g. D2 into D3): if the
 LLM's class for the incoming item conflicts with the matched canonical's class, the item
@@ -25,7 +30,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from .canonical_decisions import RunDecisionLedger
 from .canonical_store import CanonicalStore
+from .ingredient_identity import GuardVerdict, check_merge, classify
 from .run_scoped_canonicalization import _orthographic_normalize
 
 LOGGER = logging.getLogger(__name__)
@@ -83,23 +90,33 @@ class CanonicalDecision:
     review_reason: str = ""
     suggestion: str = ""         # best guess shown in the review queue
     candidates_considered: list[str] = field(default_factory=list)
+    decision_id: str = ""        # handle into the run's decision ledger ("" = untracked)
 
 
 class IngredientCanonicalizer:
     def __init__(
         self,
         *,
-        store: CanonicalStore,
+        store: CanonicalStore | RunDecisionLedger,
         llm: IngredientLLM,
         candidate_provider: CandidateProvider | None = None,
         normalize=default_normalize,
         confidence_threshold: float = 0.75,
+        identity_guard_mode: str = "off",
+        adjudicator=None,
     ) -> None:
+        # Reads and writes both go through the ledger; a plain store gets wrapped in an
+        # immediate-mode one so there is a single write path, not two.
         self.store = store
+        self.ledger = store if isinstance(store, RunDecisionLedger) else RunDecisionLedger(store, defer=False)
         self.llm = llm
         self.candidate_provider = candidate_provider or WholeListCandidateProvider()
         self.normalize = normalize
         self.confidence_threshold = confidence_threshold
+        self.identity_guard_mode = identity_guard_mode
+        # Optional second opinion for `adjudicate` verdicts. Without one, an
+        # unverifiable pair goes to review rather than through.
+        self.adjudicator = adjudicator
 
     def canonicalize(self, raw_name: str, *, context: str = "") -> CanonicalDecision:
         normalized = self.normalize(raw_name)
@@ -111,10 +128,22 @@ class IngredientCanonicalizer:
 
         hit = self.store.lookup(normalized)
         if hit is not None:
+            # Guard cache hits too. A legacy bad alias would otherwise resolve for
+            # free forever, never facing the checks that would have caught it.
+            guard = self._guard(raw_name, normalized, hit)
+            if guard.blocks and self.identity_guard_mode == "apply":
+                return self._review(raw_name, normalized, [], reason=f"identity_guard:{guard.rule}",
+                                    suggestion=hit, conf=1.0)
+            record = self.ledger.stage_cache_hit(
+                normalized, hit, raw_name=raw_name,
+                guard_rule=guard.rule, guard_verdict=guard.verdict,
+                commit_eligible=not guard.blocks,
+            )
             return CanonicalDecision(
                 raw_name=raw_name, normalized=normalized, canonical=hit,
                 confidence=1.0, method="cache",
                 disambiguation_class=self.store.disambiguation_class_of(hit),
+                decision_id=record.decision_id,
             )
 
         candidates = self.candidate_provider.candidates(normalized, self.store)
@@ -123,16 +152,43 @@ class IngredientCanonicalizer:
         )
         return self._apply_verdict(raw_name, normalized, candidates, verdict, context)
 
+    # -- identity guards ---------------------------------------------------------
+    def _guard(self, raw_name: str, normalized: str, candidate: str) -> GuardVerdict:
+        """Structural check on a proposed merge; `allow` when the guards are off."""
+        if self.identity_guard_mode == "off" or not candidate:
+            return GuardVerdict("allow")
+        verdict = check_merge(
+            classify(raw_name, normalized),
+            classify(candidate, self.normalize(candidate)),
+        )
+        if verdict.verdict != "adjudicate":
+            return verdict
+        if self.adjudicator is None:
+            return GuardVerdict("review", verdict.rule, f"{verdict.detail}; no adjudicator")
+        try:
+            same = self.adjudicator(raw_name=raw_name, candidate=candidate, rule=verdict.rule)
+        except Exception:
+            LOGGER.warning("identity adjudication failed raw=%s candidate=%s", raw_name, candidate,
+                           exc_info=True)
+            return GuardVerdict("review", verdict.rule, f"{verdict.detail}; adjudication failed")
+        if same:
+            return GuardVerdict("allow", verdict.rule, f"{verdict.detail}; adjudicated same")
+        return GuardVerdict("review", verdict.rule, f"{verdict.detail}; adjudicated different")
+
     # -- internals --------------------------------------------------------------
     def _review(
         self, raw_name, normalized, candidates, *, reason, suggestion="", conf=0.0, dclass=""
     ) -> CanonicalDecision:
         LOGGER.info("ingredient_review raw=%s normalized=%s reason=%s suggestion=%s",
                     raw_name, normalized, reason, suggestion)
+        record = self.ledger.stage_review(
+            normalized_key=normalized, raw_name=raw_name, reason=reason, suggestion=suggestion,
+        )
         return CanonicalDecision(
             raw_name=raw_name, normalized=normalized, canonical="", method="review",
             needs_review=True, review_reason=reason, suggestion=suggestion,
             confidence=conf, disambiguation_class=dclass, candidates_considered=list(candidates),
+            decision_id=record.decision_id,
         )
 
     def _apply_verdict(self, raw_name, normalized, candidates, verdict: LLMVerdict, context) -> CanonicalDecision:
@@ -156,12 +212,24 @@ class IngredientCanonicalizer:
                 return self._review(raw_name, normalized, candidates,
                                     reason="low_confidence", suggestion=matched,
                                     conf=verdict.confidence, dclass=incoming_class)
-            self.store.add_variant(normalized, matched)
+            guard = self._guard(raw_name, normalized, matched)
+            if guard.blocks and self.identity_guard_mode == "apply":
+                return self._review(raw_name, normalized, candidates,
+                                    reason=f"identity_guard:{guard.rule}", suggestion=matched,
+                                    conf=verdict.confidence, dclass=incoming_class)
+            record = self.ledger.stage_match(
+                normalized_key=normalized, raw_name=raw_name, canonical=matched,
+                confidence=verdict.confidence,
+                disambiguation_class=matched_class or incoming_class,
+                guard_rule=guard.rule, guard_verdict=guard.verdict,
+                commit_eligible=not guard.blocks,
+            )
             return CanonicalDecision(
                 raw_name=raw_name, normalized=normalized, canonical=matched,
                 confidence=verdict.confidence, method="llm_match",
                 disambiguation_class=matched_class or incoming_class,
                 candidates_considered=list(candidates),
+                decision_id=record.decision_id,
             )
 
         if decision == "new":
@@ -173,15 +241,26 @@ class IngredientCanonicalizer:
                 return self._review(raw_name, normalized, candidates,
                                     reason="low_confidence_new", suggestion=name,
                                     conf=verdict.confidence, dclass=incoming_class)
-            self.store.add_canonical(
-                name, disambiguation_class=incoming_class, created_by="llm",
-                confidence=verdict.confidence, variant_key=self.normalize(name),
+            # Guard `new` against the name it PROPOSES, not the nearest existing
+            # canonical: a blend being incompatible with the nearest nutrient is a
+            # reason to create its own column, not to refuse creation.
+            guard = self._guard(raw_name, normalized, name)
+            if guard.blocks and self.identity_guard_mode == "apply":
+                return self._review(raw_name, normalized, candidates,
+                                    reason=f"identity_guard:{guard.rule}", suggestion=name,
+                                    conf=verdict.confidence, dclass=incoming_class)
+            record = self.ledger.stage_new(
+                normalized_key=normalized, raw_name=raw_name, canonical=name,
+                canonical_variant_key=self.normalize(name),
+                confidence=verdict.confidence, disambiguation_class=incoming_class,
+                guard_rule=guard.rule, guard_verdict=guard.verdict,
+                commit_eligible=not guard.blocks,
             )
-            self.store.add_variant(normalized, name)
             return CanonicalDecision(
                 raw_name=raw_name, normalized=normalized, canonical=name, is_new=True,
                 confidence=verdict.confidence, method="llm_new",
                 disambiguation_class=incoming_class, candidates_considered=list(candidates),
+                decision_id=record.decision_id,
             )
 
         # uncertain (or anything unexpected) -> review, never guess
@@ -198,24 +277,97 @@ _SYSTEM_PROMPT = (
     "You standardize ONE supplement ingredient label into a canonical column name for a "
     "product-comparison dataset. You are given the raw label and the list of canonical names "
     "that already exist.\n\n"
-    "RULES:\n"
-    "1. Combine different chemical FORMS / salts / sources / botanical qualifiers of the SAME "
-    "nutrient into one base name. Strip '(as ...)', Latin binomials, plant parts (fruit/leaf/"
-    "root/bark/seed), extraction ratios (e.g. 4:1), trademark/brand wording, 'Organic'/'Vegan'. "
-    "Examples: 'Magnesium Glycinate'->'Magnesium'; 'Vitamin D3 (as cholecalciferol)'->'Vitamin D3'; "
-    "'Pumpkin Seed Oil (Cucurbita pepo)'->'Pumpkin Seed Oil'.\n"
-    "2. NEVER merge genuinely DIFFERENT nutrients. Vitamin D2 (ergocalciferol) is NOT Vitamin D3 "
-    "(cholecalciferol). Vitamin K1 (phylloquinone) is NOT Vitamin K2 (menaquinone); MK-4 and MK-7 "
-    "are BOTH forms of Vitamin K2. If you are not sure two things are the same nutrient, return "
-    "'uncertain' rather than guessing.\n"
-    "3. 'disambiguation_class' is a short stable tag for the distinct nutrient identity "
-    "(e.g. vitamin_d3, vitamin_d2, vitamin_k1, vitamin_k2, magnesium). Use the SAME tag for all "
-    "forms of one nutrient and DIFFERENT tags for different nutrients. It is enforced as a guard.\n\n"
+    "COMBINE (same substance, different wording) -> 'match':\n"
+    "- Salts, esters and chelates of the same element or molecule: 'Magnesium Glycinate' -> "
+    "'Magnesium'; 'Zinc Picolinate' -> 'Zinc'.\n"
+    "- '(as ...)' clauses, Latin binomials, plant parts (fruit/leaf/root/bark/seed), extraction "
+    "ratios (4:1), trademark/brand wording, 'Organic'/'Vegan': 'Vitamin D3 (as cholecalciferol)' "
+    "-> 'Vitamin D3'; 'Pumpkin Seed Oil (Cucurbita pepo)' -> 'Pumpkin Seed Oil'.\n"
+    "- Spelling variants, typos and abbreviations of the same substance: 'gamma aminobutyric "
+    "acid' -> 'GABA'; 'niacin' -> 'Vitamin B3'.\n"
+    "- An unprefixed name and a stereochemical prefix of the SAME molecule: 'Taurine' and "
+    "'L-Taurine' are the same.\n\n"
+    "NEVER MERGE (different identity) -> return 'new' or 'uncertain', never 'match':\n"
+    "1. MIXTURE vs SINGLE SUBSTANCE. A proprietary blend, matrix, complex, formula or 'blend' is "
+    "a MIXTURE and is never a form of any single nutrient it contains. 'Electrolyte Hydration "
+    "Matrix' is NOT Choline. A mixture gets its OWN canonical name.\n"
+    "2. DIFFERENT NUTRIENTS. Vitamin D2 (ergocalciferol) is NOT Vitamin D3 (cholecalciferol). "
+    "Vitamin K1 (phylloquinone) is NOT Vitamin K2 (menaquinone); MK-4 and MK-7 are BOTH forms of "
+    "Vitamin K2.\n"
+    "3. STEREOCHEMISTRY AND CLOSE MOLECULES. 'DL-Methionine' is NOT 'L-Methionine'. "
+    "'DL-Phenylalanine' is NOT 'L-Phenylalanine'. 'L-Cystine' is NOT 'L-Cysteine' — these are "
+    "different molecules, not different spellings.\n"
+    "4. DIFFERENT BIOLOGICAL SOURCE. Whey protein is NOT soy protein. Different plant species are "
+    "different ingredients even when plant part and extraction ratio match: rosemary (Rosmarinus "
+    "officinalis) is NOT saw palmetto (Serenoa repens).\n"
+    "5. MULTI-INGREDIENT STRINGS. A label listing several distinct ingredients is not any one of "
+    "them -> 'uncertain'.\n"
+    "6. FRAGMENTS with no identity of their own ('4:1 Extract', 'Extract Blend', 'Electrolytes') "
+    "-> 'uncertain'.\n\n"
+    "SOURCE COMPOUNDS: a source compound may share the base nutrient's NAME ('Magnesium Oxide' "
+    "-> 'Magnesium') because that is a naming decision. Do NOT treat it as a statement about the "
+    "amount: a source-compound row may report compound mass rather than elemental mass. Naming is "
+    "your job; the amount is not.\n\n"
+    "'new' IS A CORRECT ANSWER, NOT A FAILURE. Creating a new canonical name for a genuine "
+    "ingredient with no match is the right outcome. Never pick the closest-looking name from the "
+    "list merely because it is there. When you cannot tell, return 'uncertain' — that routes the "
+    "item to a human, which is the desired result for a doubtful case.\n\n"
+    "'disambiguation_class' is a short stable tag for the distinct identity (e.g. vitamin_d3, "
+    "vitamin_d2, vitamin_k2, magnesium, l_methionine, dl_methionine). Use the SAME tag for all "
+    "forms of one substance and DIFFERENT tags for different substances. For a mixture, tag the "
+    "mixture itself, never a member nutrient. It is enforced as a guard.\n\n"
+    "'confidence' is your probability that the label is the SAME substance as the canonical you "
+    "chose. Use a value below 0.75 whenever you are unsure; do not report 0.95+ unless the "
+    "identity is beyond doubt.\n\n"
     "Return JSON only: {\"decision\":\"match|new|uncertain\", \"canonical_name\":\"...\", "
     "\"disambiguation_class\":\"...\", \"confidence\":0.0-1.0}. "
-    "For 'match', canonical_name MUST be copied EXACTLY from the existing list. For 'new', it is the "
-    "clean base name to create. Prefer 'uncertain' over a wrong merge."
+    "For 'match', canonical_name MUST be copied EXACTLY from the existing list. For 'new', it is "
+    "the clean base name to create."
 )
+
+
+_ADJUDICATION_SYSTEM_PROMPT = (
+    "You are the SKEPTIC in a two-stage ingredient review. Another model already claimed "
+    "these two supplement labels name the SAME substance. Your job is to argue the opposite.\n\n"
+    "Give the strongest specific reason they are DISTINCT substances — different molecule, "
+    "different stereochemistry, different salt where the base differs, synthetic vs natural "
+    "form, a mixture versus one of its members, a remainder versus a total, or different "
+    "biological source. Answer \"same\" ONLY if you cannot construct such a reason.\n\n"
+    "Being unsure means answering \"different\": a wrong merge silently corrupts a shared "
+    "dataset, while a wrong split only creates one extra column that a human can merge later.\n\n"
+    "Return JSON only: {\"same\": true|false, \"reason\": \"...\"}"
+)
+
+
+class OpenAIIdentityAdjudicator:
+    """Second opinion for `adjudicate` verdicts, framed to argue against merging."""
+
+    def __init__(self, client, *, model: str | None = None) -> None:
+        self.client = client
+        self.model = model
+
+    def __call__(self, *, raw_name: str, candidate: str, rule: str) -> bool:
+        text = self.client.create_chat_completion(
+            _ADJUDICATION_SYSTEM_PROMPT,
+            f"Label A (incoming): {raw_name}\nLabel B (existing column): {candidate}\n"
+            f"Structural concern raised: {rule}",
+            asin="__ingredient_identity_adjudication__",
+            field="ingredient_identity_adjudication",
+            retry_attempt=0,
+            model=self.model,
+        )
+        try:
+            payload = _parse_json_response(text)
+        except json.JSONDecodeError:
+            LOGGER.warning("identity adjudication returned non-JSON; treating as different raw=%s",
+                           raw_name)
+            return False
+        same = payload.get("same")
+        if isinstance(same, str):
+            same = same.strip().lower() in {"true", "yes", "same"}
+        LOGGER.info("identity_adjudication raw=%s candidate=%s rule=%s same=%s reason=%s",
+                    raw_name, candidate, rule, bool(same), str(payload.get("reason", ""))[:160])
+        return bool(same)
 
 
 def _build_user_prompt(raw_name: str, candidates: list[str], context: str) -> str:

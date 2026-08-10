@@ -200,6 +200,8 @@ def _build_detail_mode_export(
         "scraped_at",
         "title",
         "error",
+        "facts_extraction_status",
+        "facts_failure_reason",
         "Other ingredients",
         "unparsed_ingredients",
         *metadata_columns,
@@ -233,6 +235,8 @@ def _build_detail_mode_export(
                 "scraped_at": result.scraped_at.isoformat(),
                 "title": result.title,
                 "error": result.error or "",
+                "facts_extraction_status": result.facts_extraction_status,
+                "facts_failure_reason": result.facts_failure_reason,
             }
         )
         detail = result.supplement_facts_detail

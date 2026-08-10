@@ -786,3 +786,141 @@ class VisionFieldResolverTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _TextOnlyClient:
+    """Returns one canned Supplement Facts payload for any text prompt."""
+
+    def __init__(self, payload: dict | None = None) -> None:
+        self.calls: list[dict] = []
+        self.payload = payload if payload is not None else {
+            "panel_detected": True,
+            "confidence": 0.9,
+            "evidence": "Supplement Facts table in page HTML",
+            "metadata": [{"label": "Serving Size", "raw_value_text": "2 capsules"}],
+            "ingredients": [
+                {"name": "Vitamin C", "raw_amount_text": "500 mg", "category": "ingredient"},
+                {"name": "Zinc", "raw_amount_text": "15 mg", "category": "ingredient"},
+            ],
+            "other_ingredients": "",
+            "unparsed_fragments": [],
+        }
+
+    def create_chat_completion(self, system_prompt, user_prompt, **kwargs) -> str:
+        self.calls.append({"user_prompt": user_prompt, **kwargs})
+        return json.dumps(self.payload)
+
+
+class HtmlFactsFallbackTests(unittest.TestCase):
+    """ADR-001 fallback leg: recover the panel from page HTML when images fail."""
+
+    def setUp(self) -> None:
+        root_dir = Path(__file__).resolve().parents[1] / ".test_artifacts"
+        root_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir = root_dir / f"html_fallback_{uuid4().hex}"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _resolver(self, client) -> VisionFieldResolver:
+        return VisionFieldResolver(
+            client=client, model="gpt-5.4-mini", cache_file=self.temp_dir / "vision_cache.json",
+        )
+
+    def test_panel_is_recovered_from_facts_text(self) -> None:
+        client = _TextOnlyClient()
+        detail = self._resolver(client).resolve_supplement_facts_detail_from_text(
+            asin="B0TEST", facts_text="Serving Size 2 capsules\nVitamin C 500 mg\nZinc 15 mg",
+        )
+
+        self.assertIsNotNone(detail)
+        self.assertEqual([i.name for i in detail.ingredients], ["Vitamin C", "Zinc"])
+        self.assertEqual(detail.source, "html_facts_table")
+        # no image was sent -- this is the text path
+        self.assertNotIn("image_inputs", client.calls[0])
+        self.assertEqual(client.calls[0]["field"], "__facts_panel_detail_html__")
+
+    def test_empty_text_makes_no_api_call(self) -> None:
+        client = _TextOnlyClient()
+        self.assertIsNone(
+            self._resolver(client).resolve_supplement_facts_detail_from_text(asin="B0TEST", facts_text="   ")
+        )
+        self.assertEqual(client.calls, [])
+
+    def test_low_confidence_payload_is_rejected(self) -> None:
+        client = _TextOnlyClient(payload={
+            "panel_detected": True, "confidence": 0.1,
+            "ingredients": [{"name": "Zinc", "raw_amount_text": "15 mg", "category": "ingredient"}],
+        })
+        self.assertIsNone(
+            self._resolver(client).resolve_supplement_facts_detail_from_text(
+                asin="B0TEST", facts_text="Zinc 15 mg",
+            )
+        )
+
+
+class _DroppingImageClient:
+    """Client whose first image is unreachable; records the classification prompt."""
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self.image_counts: list[int] = []
+
+    def prepare_reachable_image_inputs(self, image_inputs, *, force_inline: bool = False):
+        # index 0 is unreachable -- survivors keep their ORIGINAL indices
+        return [(i, dict(inp)) for i, inp in enumerate(image_inputs) if i != 0]
+
+    def create_chat_completion(self, system_prompt, user_prompt, **kwargs) -> str:
+        self.prompts.append(user_prompt)
+        self.image_counts.append(len(kwargs.get("image_inputs") or []))
+        return json.dumps({"images": [{
+            "slot_index": 1, "physical_id": "panel", "roles": ["facts_panel"],
+            "readability": "high", "visible_text_summary": "Supplement Facts", "confidence": 0.95,
+        }]})
+
+
+class ClassificationSlotAlignmentTests(unittest.TestCase):
+    """A dropped image must leave the prompt and the request in step.
+
+    Regression: unreachable images were removed after the positional prompt was
+    written, so the model received more slot lines than pictures and every
+    classification shifted onto the wrong image -- the facts panel ended up tagged
+    on a marketing image, and the panel was reported as missing.
+    """
+
+    def setUp(self) -> None:
+        root_dir = Path(__file__).resolve().parents[1] / ".test_artifacts"
+        root_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir = root_dir / f"slot_align_{uuid4().hex}"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_dropped_image_is_removed_from_the_prompt_too(self) -> None:
+        client = _DroppingImageClient()
+        resolver = VisionFieldResolver(
+            client=client, model="gpt-5.4-mini", cache_file=self.temp_dir / "c.json",
+        )
+        images = [
+            GalleryImageRecord(
+                slot_index=i, variant="MAIN" if i == 0 else "PT01",
+                large_url=f"https://example.com/{name}.jpg",
+                hi_res_url=f"https://example.com/{name}-hi.jpg",
+                main_urls=[f"https://example.com/{name}-main.jpg"],
+                physical_id=name,
+            )
+            for i, name in enumerate(["unreachable", "panel"])
+        ]
+
+        resolver.resolve_job(
+            asin="B0TEST", requested_fields=["packaging_type"], images=images,
+            extract_supplement_facts_details=False,
+        )
+
+        prompt = client.prompts[0]
+        self.assertEqual(client.image_counts[0], 1)          # one image sent
+        self.assertEqual(prompt.count("slot_index="), 1)     # one slot line
+        self.assertIn("physical_id=panel", prompt)
+        self.assertNotIn("physical_id=unreachable", prompt)

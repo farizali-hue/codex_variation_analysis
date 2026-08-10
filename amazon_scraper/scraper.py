@@ -312,6 +312,9 @@ class AmazonScraper:
                     title="",
                     fields={},
                     error=status,
+                    page_scrape_status=status,
+                    facts_extraction_status="failed" if self.extract_supplement_facts_details else "not_requested",
+                    facts_failure_reason=f"page_status:{status}",
                 )
 
             title = extract_title(soup)
@@ -339,6 +342,8 @@ class AmazonScraper:
             )
             gallery_images = extract_gallery_images(html)
             supplement_facts_detail = None
+            facts_status = "not_requested" if not self.extract_supplement_facts_details else ""
+            facts_failure_reason = ""
             try:
                 vision_result = self.vision_resolver.resolve_job(
                     asin=job.asin,
@@ -361,12 +366,28 @@ class AmazonScraper:
                 )
                 image_field_results = {}
                 supplement_facts_detail = None
+                facts_failure_reason = f"image_path_failed: {exc}"[:300]
             LOGGER.debug(
                 "Resolved image evidence asin=%s gallery_images=%d image_fields=%d",
                 job.asin,
                 len(gallery_images),
                 len(image_field_results),
             )
+
+            if self.extract_supplement_facts_details and supplement_facts_detail is not None:
+                facts_status = "image"
+            elif self.extract_supplement_facts_details:
+                # HTML fallback: the page's own facts table still carries the panel when
+                # the image path failed or found no readable panel.
+                supplement_facts_detail = self._resolve_facts_detail_from_html(
+                    asin=job.asin, facts_table=facts_table, requested_fields=requested_fields,
+                )
+                if supplement_facts_detail is not None:
+                    facts_status = "html_fallback"
+                elif facts_failure_reason:
+                    facts_status = "failed"
+                else:
+                    facts_status = "no_panel_found"
             field_results = dict(image_field_results)
             for field_name in requested_fields:
                 self._raise_if_cancelled()
@@ -418,6 +439,9 @@ class AmazonScraper:
                 fields=normalized_field_results,
                 error=None if status in {"OK", "PARTIAL"} else status,
                 supplement_facts_detail=supplement_facts_detail,
+                page_scrape_status=status,
+                facts_extraction_status=facts_status,
+                facts_failure_reason=facts_failure_reason,
             )
             if started_run_scope:
                 self._finalize_run_scoped_result(job, scrape_result)
@@ -446,6 +470,9 @@ class AmazonScraper:
                 scraped_at=datetime.now(tz=timezone.utc),
                 fields={},
                 error=str(exc),
+                page_scrape_status="NAVIGATION_ERROR",
+                facts_extraction_status="failed" if self.extract_supplement_facts_details else "not_requested",
+                facts_failure_reason=str(exc)[:300],
             )
         finally:
             self._log_job_api_usage(job.asin)
@@ -668,6 +695,23 @@ class AmazonScraper:
             driver.quit()
         except Exception:
             LOGGER.debug("Ignoring WebDriver shutdown error during cancellation", exc_info=True)
+
+    def _resolve_facts_detail_from_html(self, *, asin: str, facts_table: str, requested_fields: list[str]):
+        """Second leg of ADR-001: recover the panel from page HTML when images fail."""
+        resolver = getattr(self.vision_resolver, "resolve_supplement_facts_detail_from_text", None)
+        if resolver is None or not (facts_table or "").strip():
+            return None
+        try:
+            detail = resolver(asin=asin, facts_text=facts_table, requested_fields=requested_fields)
+        except (OpenAIBudgetExceededError, OpenAIRunCancelledError, ScrapeCancelledError):
+            raise
+        except Exception:
+            LOGGER.warning("HTML facts-panel fallback failed asin=%s", asin, exc_info=True)
+            return None
+        if detail is not None:
+            LOGGER.info("Recovered Supplement Facts panel from HTML asin=%s ingredients=%d",
+                        asin, len(detail.ingredients))
+        return detail
 
     def _build_driver(self) -> webdriver.Chrome:
         """Build a Chrome driver with conservative automation flags."""

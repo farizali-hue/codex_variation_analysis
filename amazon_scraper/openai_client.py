@@ -7,12 +7,17 @@ import mimetypes
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass
 from urllib import error, request
 
 from .project_env import load_project_dotenv
 
 LOGGER = logging.getLogger(__name__)
+
+# Gallery image downloads hit Amazon's CDN, which resets connections now and then.
+_IMAGE_DOWNLOAD_ATTEMPTS = 3
+_IMAGE_DOWNLOAD_BACKOFF_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,7 @@ class OpenAIConfig:
     embedding_model: str
     chat_model: str
     vision_model: str = ""
+    canonicalization_model: str = ""
     api_base: str = "https://api.openai.com/v1"
     timeout_seconds: int = 60
     allow_remote_image_urls: bool = False
@@ -90,6 +96,7 @@ class OpenAIConfig:
         embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "").strip()
         chat_model = os.getenv("OPENAI_CHAT_MODEL", "").strip()
         vision_model = os.getenv("OPENAI_VISION_MODEL", "").strip()
+        canonicalization_model = os.getenv("OPENAI_CANONICALIZATION_MODEL", "").strip()
         allow_remote_image_urls = _read_optional_bool_env("OPENAI_VISION_REMOTE_URLS", default=False)
         missing = [
             name
@@ -107,6 +114,7 @@ class OpenAIConfig:
             embedding_model=embedding_model,
             chat_model=chat_model,
             vision_model=vision_model,
+            canonicalization_model=canonicalization_model,
             allow_remote_image_urls=allow_remote_image_urls,
             max_cost_usd=_read_optional_float_env("OPENAI_MAX_COST_USD"),
             embedding_cost_per_1m_tokens=_resolve_embedding_model_price(
@@ -157,20 +165,27 @@ class OpenAIConfig:
                 "chat_output_cost_per_1m_tokens. If your configured model is not in the built-in "
                 "pricing catalog, set the missing prices manually."
             )
-        vision_model = self.resolved_vision_model()
-        normalized_vision_model = _normalize_model_name(vision_model)
         normalized_chat_model = _normalize_model_name(self.chat_model)
-        if vision_model and normalized_vision_model != normalized_chat_model:
-            input_price = _resolve_chat_input_model_price(vision_model, None)
-            output_price = _resolve_chat_output_model_price(vision_model, None)
+        for env_name, override_model in (
+            ("OPENAI_VISION_MODEL", self.resolved_vision_model()),
+            ("OPENAI_CANONICALIZATION_MODEL", self.resolved_canonicalization_model()),
+        ):
+            if not override_model or _normalize_model_name(override_model) == normalized_chat_model:
+                continue
+            input_price = _resolve_chat_input_model_price(override_model, None)
+            output_price = _resolve_chat_output_model_price(override_model, None)
             if self.max_cost_usd is not None and (input_price is None or output_price is None):
                 raise OpenAIConfigError(
-                    "A max cost limit with OPENAI_VISION_MODEL requires built-in pricing for the configured "
-                    "vision model or matching OPENAI_CHAT_MODEL pricing."
+                    f"A max cost limit with {env_name} requires built-in pricing for the "
+                    "configured model or matching OPENAI_CHAT_MODEL pricing."
                 )
 
     def resolved_vision_model(self) -> str:
         return self.vision_model.strip() or self.chat_model
+
+    def resolved_canonicalization_model(self) -> str:
+        """Ingredient matching is the hardest judgment here — allow a stronger model."""
+        return self.canonicalization_model.strip() or self.chat_model
 
 
 @dataclass
@@ -454,39 +469,56 @@ class OpenAIClient:
         message = str(exc).lower()
         return "invalid_image_url" in message or "timeout while downloading" in message
 
-    def _prepare_image_inputs_for_request(self, image_inputs: list[dict[str, str]]) -> list[dict[str, str]]:
-        if self.config.allow_remote_image_urls:
-            return [
-                {
-                    "url": str(image_input.get("url", "") or "").strip(),
-                    "detail": str(image_input.get("detail", "auto") or "auto").strip() or "auto",
-                }
-                for image_input in image_inputs
-                if str(image_input.get("url", "") or "").strip()
-            ]
-        return self._convert_image_inputs_to_data_urls(image_inputs)
-
     def _convert_image_inputs_to_data_urls(self, image_inputs: list[dict[str, str]]) -> list[dict[str, str]]:
-        converted: list[dict[str, str]] = []
-        for image_input in image_inputs:
+        """Force inline data URLs, ignoring ``allow_remote_image_urls``.
+
+        Used by the retry path after OpenAI failed to fetch a remote image itself.
+        """
+        return [
+            prepared
+            for _, prepared in self.prepare_reachable_image_inputs(image_inputs, force_inline=True)
+        ]
+
+    def prepare_reachable_image_inputs(
+        self, image_inputs: list[dict[str, str]], *, force_inline: bool = False
+    ) -> list[tuple[int, dict[str, str]]]:
+        """Resolve inputs up front as ``(original_index, prepared_input)`` pairs.
+
+        Callers whose prompt text is positional ("classify these in the same order")
+        MUST use this before building that text and keep only the returned indices.
+        Dropping an unreachable image later would leave more prompt slots than images
+        and shift every description onto the wrong picture.
+        """
+        prepared: list[tuple[int, dict[str, str]]] = []
+        failures: list[str] = []
+        for index, image_input in enumerate(image_inputs):
             image_url = str(image_input.get("url", "") or "").strip()
             if not image_url:
                 continue
-            if image_url.startswith("data:"):
-                converted.append(
-                    {
-                        "url": image_url,
-                        "detail": str(image_input.get("detail", "auto") or "auto").strip() or "auto",
-                    }
-                )
+            detail = str(image_input.get("detail", "auto") or "auto").strip() or "auto"
+            if (self.config.allow_remote_image_urls and not force_inline) or image_url.startswith("data:"):
+                prepared.append((index, {"url": image_url, "detail": detail}))
                 continue
-            converted.append(
-                {
-                    "url": self._download_image_data_url(image_url),
-                    "detail": str(image_input.get("detail", "auto") or "auto").strip() or "auto",
-                }
+            try:
+                data_url = self._download_image_data_url(image_url)
+            except OpenAIRunCancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("Skipping unreachable gallery image url=%s reason=%s", image_url, exc)
+                failures.append(image_url)
+                continue
+            prepared.append((index, {"url": data_url, "detail": detail}))
+        if failures and not prepared:
+            raise RuntimeError(f"All {len(failures)} image download(s) failed; first url={failures[0]}")
+        if failures:
+            LOGGER.info(
+                "Continuing with %d of %d images (%d unreachable)",
+                len(prepared), len(prepared) + len(failures), len(failures),
             )
-        return converted
+        return prepared
+
+    def _prepare_image_inputs_for_request(self, image_inputs: list[dict[str, str]]) -> list[dict[str, str]]:
+        return [prepared for _, prepared in self.prepare_reachable_image_inputs(image_inputs)]
 
     def _download_image_data_url(self, image_url: str) -> str:
         cached = self._image_data_url_cache.get(image_url)
@@ -506,15 +538,33 @@ class OpenAIClient:
             },
             method="GET",
         )
-        try:
-            with request.urlopen(req, timeout=min(self.config.timeout_seconds, 30)) as response:
-                image_bytes = response.read()
-                content_type = str(response.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
-        except error.HTTPError as exc:
-            details = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Image download failed status={exc.code} url={image_url} body={details}") from exc
-        except error.URLError as exc:
-            raise RuntimeError(f"Image download failed url={image_url} reason={exc.reason}") from exc
+        # Amazon's CDN resets connections occasionally (WinError 10054 mid-handshake).
+        # That is transient, so retry before giving up; 4xx responses are not.
+        image_bytes = b""
+        content_type = ""
+        for attempt in range(_IMAGE_DOWNLOAD_ATTEMPTS):
+            self._raise_if_cancelled()
+            try:
+                with request.urlopen(req, timeout=min(self.config.timeout_seconds, 30)) as response:
+                    image_bytes = response.read()
+                    content_type = str(response.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+                break
+            except error.HTTPError as exc:
+                if exc.code < 500 or attempt == _IMAGE_DOWNLOAD_ATTEMPTS - 1:
+                    details = exc.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"Image download failed status={exc.code} url={image_url} body={details}"
+                    ) from exc
+                last_reason: object = f"status={exc.code}"
+            except error.URLError as exc:
+                if attempt == _IMAGE_DOWNLOAD_ATTEMPTS - 1:
+                    raise RuntimeError(f"Image download failed url={image_url} reason={exc.reason}") from exc
+                last_reason = exc.reason
+            LOGGER.debug(
+                "Retrying image download attempt=%d/%d url=%s reason=%s",
+                attempt + 2, _IMAGE_DOWNLOAD_ATTEMPTS, image_url, last_reason,
+            )
+            time.sleep(_IMAGE_DOWNLOAD_BACKOFF_SECONDS * (2 ** attempt))
 
         if not image_bytes:
             raise RuntimeError(f"Image download returned empty body url={image_url}")

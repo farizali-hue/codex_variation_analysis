@@ -178,6 +178,48 @@ class VisionFieldResolver:
         self.generic_confidence_threshold = generic_confidence_threshold
         self.max_facts_candidates = max(1, max_facts_candidates)
 
+    def resolve_supplement_facts_detail_from_text(
+        self,
+        *,
+        asin: str,
+        facts_text: str,
+        requested_fields: Iterable[str] = (),
+    ) -> SupplementFactsDetail | None:
+        """HTML fallback for the Supplement Facts panel (ADR-001's fallback leg).
+
+        The panel parser was previously reachable only through the image path, so one
+        unreachable gallery image dropped the whole panel even when the page HTML
+        carried the same table. This runs the same extraction prompt over that text.
+        Lives here so it shares the prompt and payload builder with the image path.
+        """
+        text = (facts_text or "").strip()
+        if not text:
+            return None
+
+        fingerprint = f"html:{asin}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:32]}"
+        payload = self.cache.get(self.model, _FACTS_PANEL_DETAIL_TASK, fingerprint)
+        if payload is None:
+            requested_summary = ", ".join(requested_fields) if requested_fields else "none"
+            response_text = self.client.create_chat_completion(
+                _FACTS_DETAIL_SYSTEM_PROMPT,
+                "Extract detailed Supplement Facts from this product page text. "
+                f"Requested fields for reuse: {requested_summary}.\n\n"
+                f"Supplement Facts text:\n{text[:6000]}",
+                asin=asin,
+                field="__facts_panel_detail_html__",
+                model=self.model,
+            )
+            payload = _parse_json_response(response_text)
+            self.cache.set(self.model, _FACTS_PANEL_DETAIL_TASK, fingerprint, payload)
+            self.cache.save()
+        if not isinstance(payload, dict):
+            return None
+
+        detail = _build_supplement_facts_detail(payload=payload, source="html_facts_table")
+        if detail is None or detail.confidence < self.classification_confidence_threshold:
+            return None
+        return detail
+
     def resolve_fields(
         self,
         *,
@@ -285,23 +327,40 @@ class VisionFieldResolver:
         )
 
     def _classify_images(self, *, asin: str, images: list[GalleryImageRecord]) -> list[ImageAnalysisResult]:
-        image_inputs: list[dict[str, str]] = []
-        prompt_lines: list[str] = []
-        fingerprint_parts: list[str] = []
-        ordered_images: list[GalleryImageRecord] = []
+        # The prompt below is positional, so images must be resolved BEFORE the slot
+        # lines are written. An unreachable image dropped later would leave more slots
+        # than pictures and shift every classification onto the wrong image.
+        candidates: list[tuple[GalleryImageRecord, str]] = []
         for image in images:
             classification_url = select_classification_image_url(image)
-            if not classification_url:
-                continue
-            ordered_images.append(image)
-            image_inputs.append({"url": classification_url, "detail": "low"})
-            prompt_lines.append(
-                f"- slot_index={image.slot_index}; physical_id={image.physical_id or '[missing]'}; variant={image.variant or '[missing]'}"
-            )
-            fingerprint_parts.append(f"{image.physical_id}:{classification_url}")
-
-        if not ordered_images:
+            if classification_url:
+                candidates.append((image, classification_url))
+        if not candidates:
             return []
+
+        raw_inputs = [{"url": url, "detail": "low"} for _, url in candidates]
+        resolver = getattr(self.client, "prepare_reachable_image_inputs", None)
+        if resolver is None:
+            prepared = list(enumerate(raw_inputs))
+        else:
+            prepared = resolver(raw_inputs)
+        if len(prepared) != len(candidates):
+            LOGGER.warning(
+                "Classifying %d of %d gallery images asin=%s; unreachable images dropped from "
+                "both the prompt and the request", len(prepared), len(candidates), asin,
+            )
+        if not prepared:
+            return []
+
+        # One prompt line per image actually sent, in the same order — by construction.
+        image_inputs = [entry for _, entry in prepared]
+        kept = [candidates[index] for index, _ in prepared]
+        ordered_images = [image for image, _ in kept]
+        prompt_lines = [
+            f"- slot_index={image.slot_index}; physical_id={image.physical_id or '[missing]'}; variant={image.variant or '[missing]'}"
+            for image, _ in kept
+        ]
+        fingerprint_parts = [f"{image.physical_id}:{url}" for image, url in kept]
 
         fingerprint = "|".join(fingerprint_parts)
         cached = self.cache.get(self.model, _GALLERY_CLASSIFICATION_TASK, fingerprint)

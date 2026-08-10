@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from amazon_scraper.canonical_decisions import RunDecisionLedger
 from amazon_scraper.canonical_store import CanonicalStore
 from amazon_scraper.ingredient_canonicalizer import (
     IngredientCanonicalizer,
@@ -134,6 +135,28 @@ class _MalformedResponseClient:
         return "Sorry, I cannot answer in JSON."
 
 
+class _RecordingClient:
+    """Captures the kwargs the adapter sends, so model routing can be asserted."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict = {}
+
+    def create_chat_completion(self, system_prompt, user_prompt, **kwargs) -> str:
+        self.kwargs = kwargs
+        return '{"decision":"uncertain","canonical_name":"","disambiguation_class":"","confidence":0.1}'
+
+
+def test_adapter_sends_the_configured_canonicalization_model() -> None:
+    # Ingredient matching may run on a stronger model than the batch chat model.
+    client = _RecordingClient()
+    llm = OpenAIIngredientLLM(client, model="gpt-5.4")
+
+    llm.decide(raw_name="Choline", normalized_name="choline", candidates=[], context="")
+
+    assert client.kwargs["model"] == "gpt-5.4"
+    assert client.kwargs["field"] == "ingredient_canonicalization"
+
+
 def test_openai_llm_adapter_returns_uncertain_on_malformed_json() -> None:
     # A garbage LLM reply must become an "uncertain" verdict (-> review queue),
     # not an exception that aborts the whole consolidation run mid-ledger.
@@ -148,3 +171,97 @@ def test_openai_llm_adapter_returns_uncertain_on_malformed_json() -> None:
 
     assert verdict.decision == "uncertain"
     assert verdict.confidence == 0.0
+
+
+# -- identity guard wiring (ADR-004 phase 3) -------------------------------------
+def _guarded(store, verdicts, mode, adjudicator=None):
+    llm = StubLLM(verdicts)
+    return IngredientCanonicalizer(
+        store=store, llm=llm, identity_guard_mode=mode, adjudicator=adjudicator,
+    ), llm
+
+
+def test_guard_blocks_a_merge_the_llm_approved_at_high_confidence(tmp_path: Path) -> None:
+    store = CanonicalStore(tmp_path / "s.json")
+    store.add_canonical("Choline", disambiguation_class="choline")
+    verdicts = {"electrolyte hydration matrix": LLMVerdict("match", "Choline", "choline", 0.99)}
+
+    engine, _ = _guarded(store, verdicts, "apply")
+    decision = engine.canonicalize("Electrolyte Hydration Matrix")
+
+    assert decision.needs_review
+    assert decision.review_reason == "identity_guard:kind_mismatch"
+    assert store.lookup("electrolyte hydration matrix") is None
+
+
+def test_guard_off_lets_the_same_merge_through(tmp_path: Path) -> None:
+    store = CanonicalStore(tmp_path / "s.json")
+    store.add_canonical("Choline", disambiguation_class="choline")
+    verdicts = {"electrolyte hydration matrix": LLMVerdict("match", "Choline", "choline", 0.99)}
+
+    engine, _ = _guarded(store, verdicts, "off")
+    assert engine.canonicalize("Electrolyte Hydration Matrix").canonical == "Choline"
+
+
+def test_shadow_keeps_routing_but_refuses_to_persist(tmp_path: Path) -> None:
+    base = CanonicalStore(tmp_path / "s.json")
+    base.add_canonical("Choline", disambiguation_class="choline")
+    ledger = RunDecisionLedger(base)
+    verdicts = {"electrolyte hydration matrix": LLMVerdict("match", "Choline", "choline", 0.99)}
+    engine, _ = _guarded(ledger, verdicts, "shadow")
+
+    decision = engine.canonicalize("Electrolyte Hydration Matrix")
+    ledger.record_outcome(decision.decision_id, accepted=True)
+    ledger.commit()
+
+    assert decision.canonical == "Choline"          # routing unchanged
+    assert not decision.needs_review
+    assert base.lookup("electrolyte hydration matrix") is None   # but never persisted
+
+
+def test_guard_runs_on_the_cache_path(tmp_path: Path) -> None:
+    # a legacy bad alias must not resolve for free forever
+    store = CanonicalStore(tmp_path / "s.json")
+    store.add_canonical("Whey Powder", disambiguation_class="whey")
+    store.add_variant("soy protein isolate", "Whey Powder")
+
+    engine, llm = _guarded(store, {}, "apply")
+    decision = engine.canonicalize("Soy Protein Isolate")
+
+    assert decision.needs_review
+    assert decision.review_reason == "identity_guard:source_qualifier_mismatch"
+    assert llm.calls == []          # still no LLM call on the cache path
+
+
+def test_adjudicator_can_clear_an_ambiguous_pair(tmp_path: Path) -> None:
+    store = CanonicalStore(tmp_path / "s.json")
+    store.add_canonical("Vitamin B1", disambiguation_class="vitamin_b1")
+    verdicts = {"thiamin b1": LLMVerdict("match", "Vitamin B1", "vitamin_b1", 0.99)}
+
+    engine, _ = _guarded(store, verdicts, "apply", adjudicator=lambda **kw: True)
+    assert engine.canonicalize("Thiamin (B1)").canonical == "Vitamin B1"
+
+    engine2, _ = _guarded(store, verdicts, "apply", adjudicator=lambda **kw: False)
+    assert engine2.canonicalize("Thiamin (B1)").needs_review
+
+
+def test_without_an_adjudicator_ambiguous_pairs_go_to_review(tmp_path: Path) -> None:
+    store = CanonicalStore(tmp_path / "s.json")
+    store.add_canonical("Folate", disambiguation_class="folate")
+    verdicts = {"folic acid": LLMVerdict("match", "Folate", "folate", 0.98)}
+
+    engine, _ = _guarded(store, verdicts, "apply")
+    assert engine.canonicalize("Folic acid").needs_review
+
+
+def test_new_is_guarded_against_its_proposed_name_not_the_nearest(tmp_path: Path) -> None:
+    # A blend must still be able to create its OWN column next to a nutrient.
+    store = CanonicalStore(tmp_path / "s.json")
+    store.add_canonical("Choline", disambiguation_class="choline")
+    verdicts = {"hydration matrix": LLMVerdict("new", "Hydration Matrix", "hydration_matrix", 0.9)}
+
+    engine, _ = _guarded(store, verdicts, "apply")
+    decision = engine.canonicalize("Hydration Matrix")
+
+    assert decision.canonical == "Hydration Matrix"
+    assert decision.is_new
