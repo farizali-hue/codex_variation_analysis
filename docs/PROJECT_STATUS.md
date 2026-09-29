@@ -69,6 +69,17 @@ that product only) — do not extend its dictionary per product; see the
 Manual finish (stage 3): clear the `*_needs_review.csv` queue, join the
 external market columns (see backlog), assemble the Consolidated xlsx.
 
+## Recently closed
+
+- **Cache storage moved from JSON to SQLite** (2026-09-29).
+  `EmbeddingCache`/`VisionCache` rewrote the whole file on every save, which
+  reached a `MemoryError` once `.cache/embeddings.json` passed 234 MB. Both now
+  sit on `SqliteKeyValueStore` ([amazon_scraper/kv_store.py](../amazon_scraper/kv_store.py)):
+  one row per write, nothing loaded at startup. Keys, vectors and every calling
+  site are unchanged — embedding vectors pack to float32, which is lossless for
+  OpenAI embeddings (verified bit-identical across 230,400 real values).
+  Existing entries carry over via `python -m amazon_scraper.run_cache_migration`.
+
 ## Known gaps / follow-up backlog
 
 None of these block usage; they are the agreed next-work candidates, roughly
@@ -94,7 +105,6 @@ grouped. Several came out of PR #1 review and were deliberately deferred.
   not captured.
 
 **Efficiency**
-- `EmbeddingCache`/`VisionCache` rewrite the whole JSON file on every save.
 - `_image_data_url_cache` (base64 page images) grows unbounded in memory.
 - Canonical cluster rename doesn't index the new key, so exact repeats
   re-judge instead of hitting the cache.

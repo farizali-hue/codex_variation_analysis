@@ -111,7 +111,7 @@ Description text is split into sentence-like chunks up to about 500 characters t
 Responsibilities:
 - Embed the field query text.
 - Embed chunk text.
-- Cache embeddings in `.cache/embeddings.json`.
+- Cache embeddings in `.cache/embeddings.sqlite3`.
 - Score chunk similarity with cosine similarity.
 - Return the top `k` chunks, with priority/order tie-breakers.
 

@@ -115,7 +115,7 @@ class AmazonScraper:
         headless: bool = False,
         delivery_zip: str = "10001",
         captcha_timeout_seconds: int = 180,
-        embedding_cache_file: Path | str = ".cache/embeddings.json",
+        embedding_cache_file: Path | str = ".cache/embeddings.sqlite3",
         debug_html_dir: Path | str | None = "logs/html_snapshots",
         openai_config: OpenAIConfig | None = None,
         cancel_event: threading.Event | None = None,

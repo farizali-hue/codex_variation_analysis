@@ -288,8 +288,8 @@ At the batch level, the UI run manager also exposes states such as:
 
 ### Caching
 
-- embeddings cache: `.cache/embeddings.json`
-- vision cache: `.cache/vision.json`
+- embeddings cache: `.cache/embeddings.sqlite3`
+- vision cache: `.cache/vision.sqlite3`
 
 ## Known Constraints
 

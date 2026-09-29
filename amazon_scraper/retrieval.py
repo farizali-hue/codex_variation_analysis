@@ -1,38 +1,44 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
+from array import array
 from pathlib import Path
-from typing import Dict, List
+from typing import List
 
+from .kv_store import SqliteKeyValueStore
 from .models import ChunkRecord
 from .openai_client import OpenAIClient
 from .value_parsers import normalize_whitespace
 
 
+def _pack(embedding: List[float]) -> bytes:
+    return array("f", embedding).tobytes()
+
+
+def _unpack(blob: bytes) -> List[float]:
+    values = array("f")
+    values.frombytes(blob)
+    return values.tolist()
+
+
 class EmbeddingCache:
     def __init__(self, cache_file: Path | str) -> None:
         self.cache_file = Path(cache_file)
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self._cache = self._load()
+        self._store = SqliteKeyValueStore(self.cache_file)
 
     def get(self, model: str, text: str) -> List[float] | None:
-        return self._cache.get(self._key(model, text))
+        blob = self._store.get(self._key(model, text))
+        return _unpack(blob) if blob is not None else None
 
     def set(self, model: str, text: str, embedding: List[float]) -> None:
-        self._cache[self._key(model, text)] = embedding
+        self._store.set(self._key(model, text), _pack(embedding))
 
     def save(self) -> None:
-        self.cache_file.write_text(json.dumps(self._cache), encoding="utf-8")
+        self._store.commit()
 
-    def _load(self) -> Dict[str, List[float]]:
-        if not self.cache_file.exists():
-            return {}
-        try:
-            return json.loads(self.cache_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
+    def close(self) -> None:
+        self._store.close()
 
     def _key(self, model: str, text: str) -> str:
         normalized = normalize_whitespace(text)

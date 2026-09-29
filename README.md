@@ -162,8 +162,10 @@ Default output:
 - `tests/`: unit coverage for extraction, image selection, input normalization, scraper behavior, and OpenAI client behavior
 
 ## Notes
-- Embeddings are cached locally in `.cache/embeddings.json`.
-- Vision analysis is cached locally in `.cache/vision.json`.
+- Embeddings are cached locally in `.cache/embeddings.sqlite3`.
+- Vision analysis is cached locally in `.cache/vision.sqlite3`.
+- Both are SQLite stores written one row at a time. To carry over entries from the
+  older `.json` caches, run `python -m amazon_scraper.run_cache_migration` once.
 - `product_type` can drive default fields, but extraction still runs strictly against the resolved field list for that row.
 - `run_product_batch.py` is the primary CLI entrypoint.
 

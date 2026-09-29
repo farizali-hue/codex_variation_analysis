@@ -18,6 +18,7 @@ from typing import Iterable, Mapping
 from .contract_value_normalization import build_output_type_instruction
 from .field_hints import get_field_hint
 from .gallery_images import GalleryImageRecord, select_classification_image_url, select_extraction_image_url
+from .kv_store import SqliteKeyValueStore
 from .models import (
     FieldResult,
     RunFieldContract,
@@ -135,26 +136,30 @@ class VisionResolutionResult:
 class VisionCache:
     def __init__(self, cache_file: Path | str) -> None:
         self.cache_file = Path(cache_file)
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        self._cache = self._load()
+        self._store = SqliteKeyValueStore(self.cache_file)
 
     def get(self, model: str, task: str, fingerprint: str, context: str = "") -> dict | None:
-        return self._cache.get(self._key(model, task, fingerprint, context))
+        blob = self._store.get(self._key(model, task, fingerprint, context))
+        if blob is None:
+            return None
+        try:
+            value = json.loads(blob.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # a corrupt row reads as a miss, matching the old whole-file load
+            return None
+        return value if isinstance(value, dict) else None
 
     def set(self, model: str, task: str, fingerprint: str, value: dict, context: str = "") -> None:
-        self._cache[self._key(model, task, fingerprint, context)] = value
+        self._store.set(
+            self._key(model, task, fingerprint, context),
+            json.dumps(value).encode("utf-8"),
+        )
 
     def save(self) -> None:
-        self.cache_file.write_text(json.dumps(self._cache), encoding="utf-8")
+        self._store.commit()
 
-    def _load(self) -> dict[str, dict]:
-        if not self.cache_file.exists():
-            return {}
-        try:
-            data = json.loads(self.cache_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {}
-        return data if isinstance(data, dict) else {}
+    def close(self) -> None:
+        self._store.close()
 
     def _key(self, model: str, task: str, fingerprint: str, context: str) -> str:
         digest = hashlib.sha256(f"{model}\n{task}\n{fingerprint}\n{context}".encode("utf-8")).hexdigest()
@@ -166,7 +171,7 @@ class VisionFieldResolver:
         self,
         client,
         model: str,
-        cache_file: Path | str = ".cache/vision.json",
+        cache_file: Path | str = ".cache/vision.sqlite3",
         classification_confidence_threshold: float = 0.55,
         generic_confidence_threshold: float = 0.65,
         max_facts_candidates: int = 3,
