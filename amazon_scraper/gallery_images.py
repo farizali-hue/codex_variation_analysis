@@ -10,8 +10,14 @@ from typing import Any
 _GALLERY_PAYLOAD_PATTERN = re.compile(r"jQuery\.parseJSON\('(?P<payload>.*?)'\)", re.DOTALL)
 _MEDIA_ID_PATTERN = re.compile(r"/images/I/([^./]+)")
 _IMAGE_BLOCK_PATTERN = re.compile(r"ImageBlock(?:ATF|BTF)")
-_JS_BOOLEAN_NULL_PATTERN = re.compile(r"\b(true|false|null|undefined)\b")
-_JS_CALL_VALUE_PATTERN = re.compile(r":\s*[A-Za-z_$][A-Za-z0-9_$.]*\([^{}[\]]*?\)")
+_JS_STRING = r"(?:'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")"
+_JS_VALUE_PATTERN = re.compile(
+    rf"(?P<string>{_JS_STRING})"
+    rf"|(?P<json_call>(?:A\.\$\.parseJSON|jQuery\.parseJSON|JSON\.parse)\(\s*(?P<json_string>{_JS_STRING})\s*\))"
+    r"|(?P<literal>\b(?:true|false|null|undefined)\b)"
+    r"|(?P<call>[A-Za-z_$][A-Za-z0-9_$.]*\([^{}[\]]*?\))",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -120,9 +126,8 @@ def _extract_direct_gallery_payload(html: str, marker_index: int) -> dict[str, A
     if not raw_object:
         return None
 
-    normalized = _JS_BOOLEAN_NULL_PATTERN.sub(_replace_js_literal, raw_object)
-    normalized = _JS_CALL_VALUE_PATTERN.sub(": None", normalized)
     try:
+        normalized = _JS_VALUE_PATTERN.sub(_normalize_js_value, raw_object)
         payload = ast.literal_eval(normalized)
     except (SyntaxError, ValueError):
         return None
@@ -162,14 +167,27 @@ def _extract_balanced_braces(text: str, start_index: int) -> str:
     return ""
 
 
-def _replace_js_literal(match: re.Match[str]) -> str:
+def _normalize_js_value(match: re.Match[str]) -> str:
+    """Decode data literals without executing any JavaScript from the page.
+
+    Amazon's MediaBlock embeds colorImages.initial as A.$.parseJSON('...').
+    Consume strings as whole tokens so words such as 'null' and call-like text
+    in URLs, variant names, or labels are never rewritten.
+    """
+    if match.group("string") is not None:
+        return match.group(0)
+    if match.group("json_call") is not None:
+        return repr(json.loads(ast.literal_eval(match.group("json_string"))))
+    if match.group("call") is not None:
+        # Preserve the existing treatment of unrelated metadata (Date.now()).
+        return "None"
     replacements = {
         "true": "True",
         "false": "False",
         "null": "None",
         "undefined": "None",
     }
-    return replacements[match.group(1)]
+    return replacements[match.group("literal")]
 
 
 def _payload_has_gallery_images(payload: dict[str, Any]) -> bool:

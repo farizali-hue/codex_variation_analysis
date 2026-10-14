@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -341,6 +342,13 @@ class AmazonScraper:
                 variations=variations,
             )
             gallery_images = extract_gallery_images(html)
+            LOGGER.info("Gallery images discovered asin=%s count=%d", job.asin, len(gallery_images))
+            if not gallery_images:
+                LOGGER.warning(
+                    "No gallery images parsed asin=%s; vision extraction will be skipped. "
+                    "Check the saved HTML gallery payload before treating the panel as absent.",
+                    job.asin,
+                )
             supplement_facts_detail = None
             facts_status = "not_requested" if not self.extract_supplement_facts_details else ""
             facts_failure_reason = ""
@@ -747,12 +755,12 @@ class AmazonScraper:
         driver.get(f"{self.base_url}/?language=en_US")
         self._wait_for_non_blocked_page(driver, purpose="session initialization")
 
-        if self.delivery_zip:
-            self._ensure_delivery_zip(driver)
+        if self.delivery_zip and not self._ensure_delivery_zip(driver):
+            raise RuntimeError(f"Unable to verify Amazon delivery ZIP {self.delivery_zip}")
 
         self._prepared_sessions.add(session_id)
 
-    def _ensure_delivery_zip(self, driver: webdriver.Chrome) -> None:
+    def _ensure_delivery_zip(self, driver: webdriver.Chrome) -> bool:
         self._raise_if_cancelled()
         LOGGER.info("Applying Amazon delivery ZIP zip=%s", self.delivery_zip)
         wait = WebDriverWait(driver, self.timeout_seconds)
@@ -765,8 +773,8 @@ class AmazonScraper:
             ],
         )
         if trigger is None:
-            LOGGER.warning("Location popover trigger not found; keeping current Amazon delivery location")
-            return
+            LOGGER.warning("Location popover trigger not found; unable to verify Amazon delivery ZIP")
+            return False
 
         driver.execute_script("arguments[0].click();", trigger)
         zip_input = self._find_first_present(
@@ -779,7 +787,7 @@ class AmazonScraper:
         )
         if zip_input is None:
             LOGGER.warning("ZIP input not found in Amazon location popover")
-            return
+            return False
 
         zip_input.clear()
         zip_input.send_keys(self.delivery_zip)
@@ -794,29 +802,60 @@ class AmazonScraper:
         )
         if apply_button is None:
             LOGGER.warning("ZIP apply button not found; unable to force delivery ZIP")
-            return
+            return False
 
         driver.execute_script("arguments[0].click();", apply_button)
-        time.sleep(2)
+        return self._finish_delivery_zip(driver, wait)
 
-        if not self._click_delivery_confirmation(driver):
-            confirm_button = self._find_first_clickable(
-                wait,
-                [
-                    (By.CSS_SELECTOR, "#GLUXConfirmClose input.a-button-input"),
-                    (By.CSS_SELECTOR, "#GLUXConfirmClose .a-button-input"),
-                    (By.ID, "GLUXConfirmClose-announce"),
-                    (By.CSS_SELECTOR, "button[name='glowDoneButton']"),
-                ],
-            )
-            if confirm_button is not None:
-                driver.execute_script("arguments[0].click();", confirm_button)
+    def _finish_delivery_zip(self, driver: webdriver.Chrome, wait: WebDriverWait) -> bool:
+        """Wait for Apply, optional confirmation, and the actual delivery header."""
+        confirmation_clicked = False
+
+        def check_update(d):
+            nonlocal confirmation_clicked
+            self._raise_if_cancelled()
+            try:
+                for error in d.find_elements(By.CSS_SELECTOR, "#GLUXZipError, #GLUXZipServerError"):
+                    if error.is_displayed() and error.text.strip():
+                        return (False, error.text.strip())
+
+                # These controls also exist in hidden markup after the dialog closes.
+                dialog_open = any(
+                    element.is_displayed()
+                    for element in d.find_elements(
+                        By.CSS_SELECTOR,
+                        "#GLUXZipUpdateInput, #GLUXConfirmClose, #GLUXConfirmClose-announce, button[name='glowDoneButton']",
+                    )
+                )
+                if not dialog_open and self._delivery_header_matches(d):
+                    return (True, "")
+                if not confirmation_clicked:
+                    confirmation_clicked = self._click_delivery_confirmation(d)
+            except StaleElementReferenceException:
+                # Apply and confirmation can replace the dialog or reload the page.
+                return False
+            return False
 
         try:
-            wait.until(lambda d: self.delivery_zip in d.page_source)
-            LOGGER.info("Amazon delivery ZIP applied zip=%s", self.delivery_zip)
+            applied, error = wait.until(check_update)
         except TimeoutException:
-            LOGGER.warning("Timed out waiting for Amazon to reflect delivery ZIP zip=%s", self.delivery_zip)
+            LOGGER.warning(
+                "Timed out verifying Amazon delivery ZIP zip=%s confirmation_clicked=%s",
+                self.delivery_zip,
+                confirmation_clicked,
+            )
+            return False
+        if not applied:
+            LOGGER.warning("Amazon delivery ZIP rejected zip=%s error=%s", self.delivery_zip, error)
+            return False
+        LOGGER.info("Amazon delivery ZIP applied and verified zip=%s", self.delivery_zip)
+        return True
+
+    def _delivery_header_matches(self, driver: webdriver.Chrome) -> bool:
+        for element in driver.find_elements(By.ID, "nav-global-location-popover-link"):
+            if element.is_displayed() and re.search(rf"(?<!\d){re.escape(self.delivery_zip)}(?!\d)", element.text):
+                return True
+        return False
 
     def _fetch_page_source(self, driver: webdriver.Chrome, url: str) -> str:
         """Fetch page HTML and wait for either product title or known blocked/not-found markers."""
@@ -1061,6 +1100,25 @@ class AmazonScraper:
         return None
 
     def _click_delivery_confirmation(self, driver: webdriver.Chrome) -> bool:
+        # Observed 2026-09-15: Continue remains hidden while Done is visible.
+        # Done is also visible *before* Apply, so wait for the accepted ZIP first.
+        zip_accepted = any(
+            element.is_displayed() and element.text.strip() == self.delivery_zip
+            for element in driver.find_elements(By.ID, "GLUXZipConfirmationValue")
+        )
+        confirmation_selectors = [
+            "input#GLUXConfirmClose, #GLUXConfirmClose input.a-button-input",
+        ]
+        if zip_accepted:
+            confirmation_selectors.append("button[name='glowDoneButton']")
+        for selector in confirmation_selectors:
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                if element.is_displayed() and element.is_enabled():
+                    label = element.text.strip() or element.get_attribute("aria-labelledby") or "Continue"
+                    LOGGER.info("Clicking Amazon delivery confirmation button label=%s", label)
+                    driver.execute_script("arguments[0].click();", element)
+                    return True
+
         confirmation_xpaths = [
             "//div[@role='dialog' or contains(@class, 'a-modal')]//span[normalize-space()='Continue']",
             "//div[@role='dialog' or contains(@class, 'a-modal')]//button[normalize-space()='Continue']",
@@ -1072,13 +1130,12 @@ class AmazonScraper:
                 if not element.is_displayed():
                     continue
                 target = self._resolve_click_target(driver, element)
-                if target is None:
+                if target is None or not target.is_displayed() or not target.is_enabled():
                     continue
                 label = element.text.strip() or target.get_attribute("value") or target.get_attribute("aria-label") or "unknown"
                 LOGGER.info("Clicking Amazon delivery confirmation button label=%s", label)
                 driver.execute_script("arguments[0].click();", target)
                 return True
-        LOGGER.warning("Amazon delivery confirmation button not found after ZIP update")
         return False
 
     def _resolve_click_target(self, driver: webdriver.Chrome, element):

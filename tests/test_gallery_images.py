@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from amazon_scraper.gallery_images import (
     extract_gallery_images,
@@ -10,6 +12,62 @@ from amazon_scraper.gallery_images import (
 
 
 class GalleryImageExtractionTests(unittest.TestCase):
+    def test_current_amazon_media_block_retains_facts_image(self) -> None:
+        html = (Path(__file__).parent / "fixtures" / "amazon_media_block_parsejson.html").read_text(encoding="utf-8")
+        images = extract_gallery_images(html)
+
+        self.assertEqual(len(images), 8)
+        self.assertEqual(images[0].physical_id, "71qSbtpAFSL")
+        self.assertEqual(images[1].physical_id, "71h0sOLz6SL")
+        self.assertEqual(images[1].variant, "PT01")
+        self.assertEqual(
+            select_extraction_image_url(images[1]),
+            "https://m.media-amazon.com/images/I/71h0sOLz6SL._AC_SL1500_.jpg",
+        )
+
+    def test_nested_json_variants_preserve_selection_and_quoted_text(self) -> None:
+        # Literal-looking words/calls inside JSON strings must remain data.
+        variant = "false null undefined true: Date.now() women's"
+        records = [{"large": "https://example.com/true/null.jpg", "variant": variant}]
+        for wrapper in ("A.$.parseJSON", "jQuery.parseJSON", "JSON.parse"):
+            with self.subTest(wrapper=wrapper):
+                html = """<script>ImageBlockATF; var data = {
+                    'landingAsinColor': 'selected',
+                    'colorImages': {
+                        'other': [{'large': 'https://example.com/wrong.jpg'}],
+                        'selected': WRAPPER(PAYLOAD)
+                    },
+                    'enabled': true, 'missing': null, 'timestamp': Date.now()
+                };</script>""".replace("WRAPPER", wrapper).replace("PAYLOAD", repr(json.dumps(records)))
+                images = extract_gallery_images(html)
+                self.assertEqual(len(images), 1)
+                self.assertEqual(images[0].large_url, records[0]["large"])
+                self.assertEqual(images[0].variant, variant)
+
+    def test_invalid_nested_json_abstains(self) -> None:
+        for value in ("'not json'", "'{}'", "'null'", "'123'", "'[]'"):
+            with self.subTest(value=value):
+                html = "<script>ImageBlockATF; var data = {'colorImages': {'initial': A.$.parseJSON(" + value + ")}};</script>"
+                self.assertEqual(extract_gallery_images(html), [])
+
+    def test_unrecognized_function_is_never_treated_as_gallery_data(self) -> None:
+        html = """<script>ImageBlockATF; var data = {
+            'colorImages': {'initial': untrustedFunction('[{"large":"https://example.com/image.jpg"}]')}
+        };</script>"""
+        self.assertEqual(extract_gallery_images(html), [])
+
+    def test_plain_js_string_values_are_not_rewritten(self) -> None:
+        html = """<script>ImageBlockATF; var data = {
+            'landingAsinColor': 'null',
+            'colorImages': {'null': [{
+                'large': 'https://example.com/true/null.jpg',
+                'variant': 'label: Date.now() undefined'
+            }]}
+        };</script>"""
+        images = extract_gallery_images(html)
+        self.assertEqual(images[0].large_url, "https://example.com/true/null.jpg")
+        self.assertEqual(images[0].variant, "label: Date.now() undefined")
+
     def test_extract_gallery_images_uses_landing_variant_and_preserves_order(self) -> None:
         html = r"""
         <script type="text/javascript">
